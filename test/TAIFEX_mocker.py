@@ -208,7 +208,7 @@ if __name__ == "__main__":
     target_port = 10000
 
     packets = [
-         create_packet_format_I024_TAIFEX(), create_packet_format_I081_TAIFEX()
+         create_packet_format_I024_TAIFEX(), create_packet_format_I081_TAIFEX(), create_packet_format_I083_TAIFEX()
     ]
     packet_index = 0
 
