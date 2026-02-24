@@ -97,20 +97,20 @@ struct I083_Packet {
 
 class TaifexParser {
 public:
-    TaifexParser();
-    ~TaifexParser();
+    TaifexParser() ;
+    ~TaifexParser() ;
 
     // Use separate callbacks for different message types
     using I024Callback = std::function<void(const I024_Packet&)>;
     using I081Callback = std::function<void(const I081_Packet&)>;
     using I083Callback = std::function<void(const I083_Packet&)>;
 
-    void start_loop(int port, I024Callback cb024, I081Callback cb81, I083Callback cb83);
-    void end_loop();
-    void set_multicast(const std::string& group, const std::string& iface_ip);
+    void start_loop(int port, I024Callback cb024, I081Callback cb81, I083Callback cb83) ;
+    void end_loop() ;
+    // void set_multicast(const std::string& group, const std::string& iface_ip) {};
 
 private:
-    void receive_loop(int port);
+    void receive_loop(int port) ;
     void process_raw_data(const uint8_t* buffer, size_t length);
 
     // Parsing logic separated to handle the CALCULATED-FLAG offset

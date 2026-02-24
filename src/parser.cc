@@ -1,24 +1,16 @@
 #include "parser.h"
+#include <iostream>
 #include <cstring>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <sstream>
 #include <algorithm>
 
-// --- Constructor & Destructor ---
-TaifexParser::TaifexParser() : running(false), sockfd(-1) {
-    time_t now = time(nullptr);
-    char timestamp[32];
-    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", localtime(&now));
-    std::string log_filename = "taifex_parser_" + std::string(timestamp) + ".log";
-    Logger::getInstance().init(log_filename);
-}
+TaifexParser::TaifexParser() : running(false), sockfd(-1) {}
 
 TaifexParser::~TaifexParser() {
     end_loop();
 }
-
-// --- Utility Functions ---
 
 uint64_t TaifexParser::bcd_to_uint(const uint8_t* bcd, size_t len) {
     uint64_t result = 0;
@@ -31,13 +23,12 @@ uint64_t TaifexParser::bcd_to_uint(const uint8_t* bcd, size_t len) {
 bool TaifexParser::verify_checksum(const uint8_t* data, size_t len) {
     if (len < 4) return false; 
     uint8_t calculated_xor = 0;
+    // Checksum 是從 Transmission Code (index 1) 到 Checksum 位元之前 (len-3)
     for (size_t i = 1; i < len - 3; ++i) {
         calculated_xor ^= data[i];
     }
     return calculated_xor == data[len - 3];
 }
-
-// --- Network Loop ---
 
 void TaifexParser::start_loop(int port, I024Callback cb24, I081Callback cb81, I083Callback cb83) {
     if (running) return;
@@ -49,7 +40,6 @@ void TaifexParser::start_loop(int port, I024Callback cb24, I081Callback cb81, I0
 }
 
 void TaifexParser::end_loop() {
-    if (!running) return;
     running = false;
     if (sockfd != -1) {
         shutdown(sockfd, SHUT_RDWR);
@@ -72,28 +62,27 @@ void TaifexParser::receive_loop(int port) {
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
     if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        close(sockfd);
+        std::cerr << "[ERROR] Bind failed on port " << port << std::endl;
         return;
     }
 
-    // --- Multicast Setup ---
-    // if (!multicast_group.empty()) {
-    //     struct ip_mreq mreq{};
-    //     mreq.imr_multiaddr.s_addr = inet_addr(multicast_group.c_str());
-    //     mreq.imr_interface.s_addr = inet_addr(interface_ip.c_str());
-    //     setsockopt(sockfd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq));
-    // }
+    std::cerr << ">>> [SERVER LIVE] Listening on UDP " << port << " <<<" << std::endl;
 
-    uint8_t buffer[2048];
+    uint8_t buffer[4096];
     while (running) {
-        ssize_t len = recv(sockfd, buffer, sizeof(buffer), 0);
+        struct sockaddr_in client_addr;
+        socklen_t addr_len = sizeof(client_addr);
+        
+        // 修正：只調用一次接收函數
+        ssize_t len = recvfrom(sockfd, buffer, sizeof(buffer), 0, (struct sockaddr*)&client_addr, &addr_len);
+
         if (len > 0) {
+            std::cerr << "[GOT DATA] Length: " << len << " bytes" << std::endl;
+            
             size_t start_pos = 0;
-            // Split packets by 0x0D 0x0A
             for (size_t i = 0; i < (size_t)len - 1; i++) {
                 if (buffer[i] == 0x0D && buffer[i + 1] == 0x0A) {
-                    size_t pkt_len = i + 2 - start_pos;
-                    process_raw_data(buffer + start_pos, pkt_len);
+                    process_raw_data(buffer + start_pos, i + 2 - start_pos);
                     start_pos = i + 2;
                 }
             }
@@ -101,25 +90,23 @@ void TaifexParser::receive_loop(int port) {
     }
 }
 
-// --- Dispatcher ---
-
 void TaifexParser::process_raw_data(const uint8_t* data, size_t length) {
     if (length < 20 || data[0] != ESC_CODE) return;
-    if (!verify_checksum(data, length)) return;
+    if (!verify_checksum(data, length)) {
+        std::cerr << "[DEBUG] Checksum failed" << std::endl;
+        return;
+    }
 
     Header header;
-    // Skip ESC(1), TransmissionCode(1), MessageKind(1)
     header.transmission_code = data[1];
     header.message_kind = data[2];
-    
-    // Time BCD 6 bytes (at index 3)
-    uint64_t t = bcd_to_uint(data + 3, 6);
-    header.info_time = std::to_string(t);
-
+    header.info_time = std::to_string(bcd_to_uint(data + 3, 6));
     header.channel_id = (uint16_t)bcd_to_uint(data + 9, 2);
     header.channel_seq = (uint32_t)bcd_to_uint(data + 11, 5);
     header.version_no = (uint8_t)bcd_to_uint(data + 16, 1);
     header.body_len = (uint16_t)bcd_to_uint(data + 17, 2);
+
+    std::cerr << "[PARSING] MessageKind: " << header.message_kind << std::endl;
 
     switch (header.message_kind) {
         case 'D': handle_i024(data, header); break; 
