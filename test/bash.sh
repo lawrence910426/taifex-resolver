@@ -41,3 +41,5 @@ docker run -d \
   --name $APP_CONTAINER \
   --restart always \
   $IMAGE_NAME ./example/taifex_resolver_app -port 10000
+
+docker exec -it $APP_CONTAINER /bin/bash 
