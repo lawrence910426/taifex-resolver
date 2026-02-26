@@ -29,6 +29,16 @@ bool TaifexParser::verify_checksum(const uint8_t* data, size_t len) {
     return calculated_xor == data[len - 3];
 }
 
+std::string TaifexParser::format_bcd_time(const uint8_t* bcd, bool has_micro) {
+    char buf[20];
+    if (has_micro) {
+        snprintf(buf, sizeof(buf), "%02x:%02x:%02x.%02x%02x%02x",
+                 bcd[0], bcd[1], bcd[2], bcd[3], bcd[4], bcd[5]);
+    } else {
+    }
+    return std::string(buf);
+}
+
 void TaifexParser::start_loop(int port, I024Callback cb24, I081Callback cb81, I083Callback cb83) {
     if (running) return;
     running = true;
@@ -98,7 +108,7 @@ void TaifexParser::process_raw_data(const uint8_t* data, size_t length) {
     Header header;
     header.transmission_code = data[1];
     header.message_kind = data[2];
-    header.info_time = std::to_string(bcd_to_uint(data + 3, 6));
+    header.info_time = format_bcd_time(data + 3, true);
     header.channel_id = (uint16_t)bcd_to_uint(data + 9, 2);
     header.channel_seq = (uint32_t)bcd_to_uint(data + 11, 5);
     header.version_no = (uint8_t)bcd_to_uint(data + 16, 1);
@@ -131,7 +141,7 @@ bool TaifexParser::handle_i024(const uint8_t* data, const Header& header) {
     pkt.calculated_flag = data[offset++];
 
     // 3. Match Time
-    pkt.match_time = std::to_string(bcd_to_uint(data + offset, 6));
+    pkt.match_time = format_bcd_time(data + offset, true);
     offset += 6;
 
     // 4. First Price 
