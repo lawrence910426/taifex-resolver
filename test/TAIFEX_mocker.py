@@ -33,7 +33,7 @@ def create_packet_format_I024_TAIFEX():
         
         # --- First Match Data ---
         b'\x30' +                      # 2.5 First-Match Sign: '0' (+)
-        b'\x00\x12\x00\x05\x00' +      # 2.6 First-Match Price: 12000.50 (BCD)
+        b'\x00\x12\x00\x05\x00' +      # 2.6 First-Match Price: 120005.00 (BCD)
         b'\x00\x00\x00\x10' +          # 2.7 First-Match Qty: 10 (BCD)
         
         # --- MATCH-DISPLAY-ITEM & OCCURS ---
@@ -41,7 +41,7 @@ def create_packet_format_I024_TAIFEX():
         
         # --- Match Data (Repeated) ---
         b'\x30' +                      # 2.9 Match Sign: '0' (+)
-        b'\x00\x12\x00\x04\x50' +      # 2.10 Match Price: 12000.45 (BCD)
+        b'\x00\x12\x00\x04\x50' +      # 2.10 Match Price: 120004.50 (BCD)
         b'\x00\x05' +                  # 2.11 Match Qty: 5 (BCD)
         
         # --- Aggregated Statistics ---
