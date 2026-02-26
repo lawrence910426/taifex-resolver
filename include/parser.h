@@ -51,7 +51,7 @@ struct I024_Packet {
     char prod_id[21];        // X(20)
     uint32_t prod_msg_seq;   // 9(10) - BCD 5 bytes
     char calculated_flag;    // X(1)  - 0:Normal, 1:Calculated
-    char match_time[12];  // 9(12) - BCD 6 bytes (HHMMSSuuuuuu)
+    std::string match_time;  // 9(12) - BCD 6 bytes (HHMMSSuuuuuu)
     
     // First Match (Always present in I024)
     char first_price_sign;   // X(1)

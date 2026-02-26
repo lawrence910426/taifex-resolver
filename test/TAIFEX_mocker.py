@@ -32,7 +32,7 @@ def create_packet_format_I024_TAIFEX():
         b'\x13\x15\x30\x99\x88\x77' +  # 2.4 Match-Time: 13:15:30.998877 (BCD)
         
         # --- First Match Data ---
-        b'\x30' +                      # 2.5 First-Match Sign: '0' (+)
+        b'\x2D' +                      # 2.5 First-Match Sign: '-' (-)
         b'\x00\x12\x00\x05\x00' +      # 2.6 First-Match Price: 120005.00 (BCD)
         b'\x00\x00\x00\x10' +          # 2.7 First-Match Qty: 10 (BCD)
         

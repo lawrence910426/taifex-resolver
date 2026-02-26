@@ -23,7 +23,6 @@ uint64_t TaifexParser::bcd_to_uint(const uint8_t* bcd, size_t len) {
 bool TaifexParser::verify_checksum(const uint8_t* data, size_t len) {
     if (len < 4) return false; 
     uint8_t calculated_xor = 0;
-    // Checksum 是從 Transmission Code (index 1) 到 Checksum 位元之前 (len-3)
     for (size_t i = 1; i < len - 3; ++i) {
         calculated_xor ^= data[i];
     }
@@ -73,7 +72,6 @@ void TaifexParser::receive_loop(int port) {
         struct sockaddr_in client_addr;
         socklen_t addr_len = sizeof(client_addr);
         
-        // 修正：只調用一次接收函數
         ssize_t len = recvfrom(sockfd, buffer, sizeof(buffer), 0, (struct sockaddr*)&client_addr, &addr_len);
 
         if (len > 0) {
@@ -120,40 +118,47 @@ void TaifexParser::process_raw_data(const uint8_t* data, size_t length) {
 bool TaifexParser::handle_i024(const uint8_t* data, const Header& header) {
     I024_Packet pkt;
     pkt.header = header;
-    size_t offset = 19; // ESC(1) + Header(18)
+    size_t offset = 19; 
 
+    // 1. Prod ID
     memcpy(pkt.prod_id, data + offset, 20);
     pkt.prod_id[20] = '\0';
     offset += 20;
 
+    // 2. Seq & Flag
     pkt.prod_msg_seq = (uint32_t)bcd_to_uint(data + offset, 5);
     offset += 5;
-
     pkt.calculated_flag = data[offset++];
 
-    uint64_t mt = bcd_to_uint(data + offset, 6);
-    snprintf(pkt.match_time, sizeof(pkt.match_time), "%012lu", mt);
+    // 3. Match Time
+    pkt.match_time = std::to_string(bcd_to_uint(data + offset, 6));
     offset += 6;
 
+    // 4. First Price 
     pkt.first_price_sign = data[offset++];
     pkt.first_price = bcd_to_uint(data + offset, 5);
     offset += 5;
-    pkt.first_quantity = (uint32_t)bcd_to_uint(data + offset, 4); // 4 bytes
+
+    // 5. First Qty 
+    pkt.first_quantity = (uint32_t)bcd_to_uint(data + offset, 4); 
     offset += 4;
 
+    // 6. Display Item & Occurs
     pkt.display_item = data[offset++];
-    int occurs = pkt.display_item & 0x7F; // Bit 0-6
+    int occurs = pkt.display_item & 0x7F; 
 
+    // 7. Repeated Match Data
     for (int i = 0; i < occurs; ++i) {
         MatchData md;
         md.price_sign = data[offset++];
-        md.price = bcd_to_uint(data + offset, 5);
+        md.price = bcd_to_uint(data + offset, 5); 
         offset += 5;
-        md.quantity = (uint16_t)bcd_to_uint(data + offset, 2); // Repeat Qty is 2 bytes!
+        md.quantity = (uint16_t)bcd_to_uint(data + offset, 2); 
         offset += 2;
         pkt.consecutive_matches.push_back(md);
     }
 
+    // 8. Cumulative Data 
     pkt.total_qty = (uint32_t)bcd_to_uint(data + offset, 4); offset += 4;
     pkt.buy_cnt = (uint32_t)bcd_to_uint(data + offset, 4);   offset += 4;
     pkt.sell_cnt = (uint32_t)bcd_to_uint(data + offset, 4);  offset += 4;
