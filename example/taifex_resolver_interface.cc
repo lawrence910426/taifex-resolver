@@ -15,6 +15,11 @@ void signal_handler(int signal) {
     keep_running = false;
 }
 
+auto get_full_price = [](char sign, uint64_t price) {
+    std::string s = (sign == '-' ? "-" : "");
+    return s + std::to_string(price);
+};
+
 std::string to_hex_str(uint32_t val) {
     std::stringstream ss;
     ss << "0x" << std::hex << std::uppercase << val;
@@ -85,25 +90,110 @@ void on_trade_match(const I024_Packet& pkt) {
 
 void on_incremental(const I081_Packet& pkt) {
     std::stringstream ss;
-    ss << "[I081] Product: " << pkt.prod_id << " | Updates: " << (int)pkt.no_md_entries;
-    
-    for (const auto& entry : pkt.entries) {
-        ss << "\n  -> " << (entry.entry_type == '0' ? "BID" : "ASK")
-           << " Level " << (int)entry.price_level 
-           << " Action " << entry.update_action
-           << ": " << entry.price << " @ " << entry.quantity;
-    }
-    Logger::getInstance().log(ss.str());
-}
+    ss << "Received Packet (I081 - Incremental):\n"
+       << "----------------------------------------\n"
+       << "Transmission Code  : " << pkt.header.transmission_code << "\n"
+       << "Message Kind       : " << pkt.header.message_kind << " (I081 - Increment)\n"
+       << "Information Time   : " << pkt.header.info_time << "\n"
+       << "Channel ID         : " << pkt.header.channel_id << "\n"
+       << "Channel Seq        : " << pkt.header.channel_seq << "\n"
+       << "----------------------------------------\n"
+       << "Prod ID            : " << pkt.prod_id << "\n"
+       << "Prod Msg Seq       : " << pkt.prod_msg_seq << "\n"
+       << "No. MD Entries     : " << (int)pkt.no_md_entries << "\n";
 
+    Logger::getInstance().log(ss.str());
+
+    std::stringstream as;
+    as << "=== Analyzed Incremental Update ===\n";
+
+    for (size_t i = 0; i < pkt.entries.size(); ++i) {
+        const auto& entry = pkt.entries[i];
+        
+        // Update Action
+        std::string action_str;
+        switch(entry.update_action) {
+            case '0': action_str = "New"; break;
+            case '1': action_str = "Change"; break;
+            case '2': action_str = "Delete"; break;
+            case '5': action_str = "Overlay"; break;
+            default:  action_str = "Unknown";
+        }
+
+        // Entry Type
+        std::string type_str;
+        switch(entry.entry_type) {
+            case '0': type_str = "BID"; break;
+            case '1': type_str = "ASK"; break;
+            case 'E': type_str = "Implied BID"; break;
+            case 'F': type_str = "Implied ASK"; break;
+            default:  type_str = "Unknown";
+        }
+
+        as << "Entry " << std::setw(2) << (i + 1) << ": "
+           << "[" << action_str << "] " << type_str 
+           << " Level " << (int)entry.price_level 
+           << " | Price: " << get_full_price(entry.price_sign, entry.price)
+           << " | Qty: " << entry.quantity << "\n";
+    }
+    as << "====================================";
+    Logger::getInstance().log(as.str());
+}
 /**
  * Handle I083: Snapshot (Full Refresh)
  * Usually received at startup or during recovery to synchronize the Order Book.
  */
 void on_snapshot(const I083_Packet& pkt) {
     std::stringstream ss;
-    ss << "[I083] Snapshot for " << pkt.prod_id << " | Levels: " << (int)pkt.no_md_entries;
+    ss << "Received Packet (I083 - Snapshot):\n"
+       << "----------------------------------------\n"
+       << "Transmission Code  : " << pkt.header.transmission_code << "\n"
+       << "Message Kind       : " << pkt.header.message_kind << " (I083 - Snapshot)\n"
+       << "Information Time   : " << pkt.header.info_time << "\n"
+       << "Channel ID         : " << pkt.header.channel_id << "\n"
+       << "Channel Seq        : " << pkt.header.channel_seq << "\n"
+       << "----------------------------------------\n"
+       << "Prod ID            : " << pkt.prod_id << "\n"
+       << "Prod Msg Seq       : " << pkt.prod_msg_seq << "\n"
+       << "Calculated Flag    : " << pkt.calculated_flag 
+       << " (" << (pkt.calculated_flag == '1' ? "Trial" : "Actual") << ")\n"
+       << "No. MD Entries     : " << (int)pkt.no_md_entries << (pkt.no_md_entries == 0 ? " (Empty Book)" : "") << "\n";
+
     Logger::getInstance().log(ss.str());
+
+    if (pkt.no_md_entries > 0) {
+        std::stringstream as;
+        as << "=== Analyzed Snapshot Content ===\n";
+
+        for (size_t i = 0; i < pkt.entries.size(); ++i) {
+            const auto& entry = pkt.entries[i];
+
+            // Entry Type
+            std::string type_str;
+            switch(entry.entry_type) {
+                case '0': type_str = "BID"; break;
+                case '1': type_str = "ASK"; break;
+                case 'E': type_str = "Implied BID"; break;
+                case 'F': type_str = "Implied ASK"; break;
+                default:  type_str = "Unknown";
+            }
+
+            std::string price_display;
+            if (pkt.calculated_flag == '1') {
+                if (entry.price == 999999999) price_display = "Market";
+                else if (entry.price == 999999999 && entry.price_sign == '-') price_display = "Market";
+                else price_display = get_full_price(entry.price_sign, entry.price);
+            } else {
+                price_display = get_full_price(entry.price_sign, entry.price);
+            }
+
+            as << "Level " << (int)entry.price_level << " " << std::setw(12) << type_str
+               << " | Price: " << std::setw(10) << price_display
+               << " | Qty: " << entry.quantity << "\n";
+        }
+        as << "==================================";
+        Logger::getInstance().log(as.str());
+    }
 }
 
 int main(int argc, char* argv[]) {
