@@ -204,7 +204,7 @@ int main(int argc, char* argv[]) {
     Logger::getInstance().init("taifex_parser.log");
 
     TaifexParser parser;
-    int port = 10000; // Default TAIFEX UDP port
+    int port = 14000; // Default TAIFEX UDP port
 
     // Simple command-line argument parsing
     for (int i = 1; i < argc; i++) {
