@@ -14,7 +14,7 @@
 struct Header {
     char transmission_code;  // X(1)
     char message_kind;       // X(1) - 'A' for I081, 'B' for I083
-    std::string info_time;   // 9(12) - BCD 6 bytes (HHMMSSuuuuuu)
+    char info_time[16];   // 9(12) - BCD 6 bytes (HHMMSSuuuuuu)
     uint16_t channel_id;     // 9(4)  - BCD 2 bytes
     uint32_t channel_seq;    // 9(10) - BCD 5 bytes
     uint8_t version_no;      // 9(2)  - BCD 1 byte
@@ -34,12 +34,14 @@ struct MDEntry {
     uint64_t price;          // 9(9)  - BCD 5 bytes
     uint32_t quantity;       // 9(8)  - BCD 4 bytes
     uint8_t price_level;     // 9(2)  - BCD 1 byte
+    uint8_t decimal_locator; // documented decimal point (Note:     I081 and I084 are 3)
 };
 
 struct MatchData {
     char price_sign;         // X(1) - '0':Positive, '-':Negative
     uint64_t price;          // 9(9) - BCD 5 bytes
     uint16_t quantity;       // 9(4) - BCD 2 bytes (Note: I024 repeat qty is 2 bytes)
+    uint8_t decimal_locator; // documented decimal point (Note: I024 is 2)
 };
 
 // --- 2. Specific Message Bodies ---
@@ -51,12 +53,13 @@ struct I024_Packet {
     char prod_id[21];        // X(20)
     uint32_t prod_msg_seq;   // 9(10) - BCD 5 bytes
     char calculated_flag;    // X(1)  - 0:Normal, 1:Calculated
-    std::string match_time;  // 9(12) - BCD 6 bytes (HHMMSSuuuuuu)
+    char match_time[16];  // 9(12) - BCD 6 bytes (HHMMSSuuuuuu)
     
     // First Match (Always present in I024)
     char first_price_sign;   // X(1)
     uint64_t first_price;    // 9(9) - BCD 5 bytes
     uint32_t first_quantity; // 9(8) - BCD 4 bytes
+    uint8_t first_price_decimal = 2;
 
     // --- Dynamic Control ---
     uint8_t display_item;    // X(1) - Bit Map (Bit 0-6 defines number of repeats)
