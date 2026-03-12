@@ -75,17 +75,22 @@ void TaifexParser::receive_loop(int port) {
         return;
     }
 
-    std::cerr << ">>> [SERVER LIVE] Listening on UDP " << port << " <<<" << std::endl;
+    // struct ip_mreq mreq;
+    // mreq.imr_multiaddr.s_addr = inet_addr("225.0.140.140"); 
+    // mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+
+    // if (setsockopt(sockfd, IPPROTO_IP, IP_ADD_MEMBERSHIP, (char *)&mreq, sizeof(mreq)) < 0) {
+    //     std::cerr << "[ERROR] Join Multicast Group Failed" << std::endl;
+    // } else {
+    //     std::cerr << "[INFO] Joined Multicast Group: 225.0.140.140" << std::endl;
+    // }
+
+    // std::cerr << ">>> [SERVER LIVE] Listening on UDP " << port << " <<<" << std::endl;
 
     uint8_t buffer[4096];
     while (running) {
         struct sockaddr_in client_addr;
-        socklen_t addr_len = sizeof(client_addr);
-        
-        ssize_t len = recvfrom(sockfd, buffer, sizeof(buffer), 0, (struct sockaddr*)&client_addr, &addr_len);
-
         if (len > 0) {
-            std::cerr << "[GOT DATA] Length: " << len << " bytes" << std::endl;
             
             size_t start_pos = 0;
             for (size_t i = 0; i < (size_t)len - 1; i++) {
