@@ -124,7 +124,7 @@ private:
 
     // Utility
     uint64_t bcd_to_uint(const uint8_t* bcd, size_t len);
-    std::string format_bcd_time(const uint8_t* bcd, bool has_micro);
+    void format_bcd_time_to_char(const uint8_t* bcd, char* out_buf, bool has_micro);
     bool verify_checksum(const uint8_t* data, size_t len);
 
     std::thread recv_thread;

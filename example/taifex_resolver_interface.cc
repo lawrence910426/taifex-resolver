@@ -15,9 +15,21 @@ void signal_handler(int signal) {
     keep_running = false;
 }
 
-auto get_full_price = [](char sign, uint64_t price) {
-    std::string s = (sign == '-' ? "-" : "");
-    return s + std::to_string(price);
+
+auto get_formatted_price = [](char sign, uint64_t price, int decimal_places) {
+    std::string s_price = std::to_string(price);
+    
+    // 補足前導零，確保長度足以處理小數點
+    if (s_price.length() <= (size_t)decimal_places) {
+        s_price.insert(0, decimal_places - s_price.length() + 1, '0');
+    }
+
+    // 插入小數點
+    if (decimal_places > 0) {
+        s_price.insert(s_price.length() - decimal_places, ".");
+    }
+
+    return (sign == '-' ? "-" : "") + s_price;
 };
 
 std::string to_hex_str(uint32_t val) {
@@ -67,18 +79,16 @@ void on_trade_match(const I024_Packet& pkt) {
        << "Extra Match Levels : " << multi_match_count << " levels\n";
 
 
-    as << "First Deal: Price = " << get_full_price(pkt.first_price_sign, pkt.first_price)
-       << " (Sign: '" << pkt.first_price_sign << "')"
+    as << "First Deal: Price = " << get_formatted_price(pkt.first_price_sign, pkt.first_price, pkt.first_price_decimal)
        << ", Quantity = " << pkt.first_quantity << "\n";
 
 
     if (multi_match_count > 0) {
         for (size_t i = 0; i < pkt.consecutive_matches.size(); ++i) {
             const auto& m = pkt.consecutive_matches[i];
-            as << "Next Deal " << std::setw(2) << (i + 1) 
-               << ": Price = " << get_full_price(m.price_sign, m.price)
-               << " (Sign: '" << m.price_sign << "')"
-               << ", Quantity = " << m.quantity << "\n";
+            as << "Next Deal " << (i + 1) << ": " 
+               << get_formatted_price(m.price_sign, m.price, m.decimal_locator) 
+               << " Qty: " << m.quantity << "\n";
         }
     }
 
@@ -130,11 +140,11 @@ void on_incremental(const I081_Packet& pkt) {
             default:  type_str = "Unknown";
         }
 
-        as << "Entry " << std::setw(2) << (i + 1) << ": "
-           << "[" << action_str << "] " << type_str 
-           << " Level " << (int)entry.price_level 
-           << " | Price: " << get_full_price(entry.price_sign, entry.price)
-           << " | Qty: " << entry.quantity << "\n";
+        for (const auto& entry : pkt.entries) {
+            as << "Level " << (int)entry.price_level 
+            << " | Price: " << get_formatted_price(entry.price_sign, entry.price, entry.decimal_locator)
+            << " | Qty: " << entry.quantity << "\n";
+        }
     }
     as << "====================================";
     Logger::getInstance().log(as.str());
@@ -187,9 +197,11 @@ void on_snapshot(const I083_Packet& pkt) {
                 price_display = get_full_price(entry.price_sign, entry.price);
             }
 
-            as << "Level " << (int)entry.price_level << " " << std::setw(12) << type_str
-               << " | Price: " << std::setw(10) << price_display
-               << " | Qty: " << entry.quantity << "\n";
+            for (const auto& entry : pkt.entries) {
+                as << "Level " << (int)entry.price_level 
+                << " | Price: " << get_formatted_price(entry.price_sign, entry.price, entry.decimal_locator)
+                << " | Qty: " << entry.quantity << "\n";
+            }
         }
         as << "==================================";
         Logger::getInstance().log(as.str());
