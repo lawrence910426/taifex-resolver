@@ -15,16 +15,18 @@ void signal_handler(int signal) {
     keep_running = false;
 }
 
+auto get_full_price = [](char sign, uint64_t price) {
+    std::string s = (sign == '-' ? "-" : "");
+    return s + std::to_string(price);
+};
 
-auto get_formatted_price = [](char sign, uint64_t price, int decimal_places) {
+auto    get_formatted_price = [](char sign, uint64_t price, int decimal_places) {
     std::string s_price = std::to_string(price);
     
-    // 補足前導零，確保長度足以處理小數點
     if (s_price.length() <= (size_t)decimal_places) {
         s_price.insert(0, decimal_places - s_price.length() + 1, '0');
     }
 
-    // 插入小數點
     if (decimal_places > 0) {
         s_price.insert(s_price.length() - decimal_places, ".");
     }
@@ -42,11 +44,6 @@ std::string to_hex_str(uint32_t val) {
 
 void on_trade_match(const I024_Packet& pkt) {
     std::stringstream ss;
-
-    auto get_full_price = [](char sign, uint64_t price) {
-        std::string s = (sign == '-' ? "-" : "");
-        return s + std::to_string(price);
-    };
 
     ss << "Received Packet:\n"
        << "----------------------------------------\n"
@@ -84,9 +81,8 @@ void on_trade_match(const I024_Packet& pkt) {
 
 
     if (multi_match_count > 0) {
-        for (size_t i = 0; i < pkt.consecutive_matches.size(); ++i) {
-            const auto& m = pkt.consecutive_matches[i];
-            as << "Next Deal " << (i + 1) << ": " 
+        for (const auto& m : pkt.consecutive_matches) {
+            as << "Next Deal: " 
                << get_formatted_price(m.price_sign, m.price, m.decimal_locator) 
                << " Qty: " << m.quantity << "\n";
         }
@@ -117,35 +113,31 @@ void on_incremental(const I081_Packet& pkt) {
     std::stringstream as;
     as << "=== Analyzed Incremental Update ===\n";
 
-    for (size_t i = 0; i < pkt.entries.size(); ++i) {
-        const auto& entry = pkt.entries[i];
-        
-        // Update Action
-        std::string action_str;
+       for (const auto& entry : pkt.entries) {
+        std::string act;
         switch(entry.update_action) {
-            case '0': action_str = "New"; break;
-            case '1': action_str = "Change"; break;
-            case '2': action_str = "Delete"; break;
-            case '5': action_str = "Overlay"; break;
-            default:  action_str = "Unknown";
+            case '0': act = "NEW"; break;
+            case '1': act = "CHG"; break;
+            case '2': act = "DEL"; break;
+            case '5': act = "Ove"; break;
+            default:  act = "UNK";
         }
 
-        // Entry Type
-        std::string type_str;
+        std::string side;
         switch(entry.entry_type) {
-            case '0': type_str = "BID"; break;
-            case '1': type_str = "ASK"; break;
-            case 'E': type_str = "Implied BID"; break;
-            case 'F': type_str = "Implied ASK"; break;
-            default:  type_str = "Unknown";
+            case '0': side = "BID"; break;
+            case '1': side = "ASK"; break;
+            case 'E': side = "Implied BID"; break;
+            case 'F': side = "Implied ASK"; break;
+            default:  side = "Unknown";
         }
 
-        for (const auto& entry : pkt.entries) {
-            as << "Level " << (int)entry.price_level 
-            << " | Price: " << get_formatted_price(entry.price_sign, entry.price, entry.decimal_locator)
-            << " | Qty: " << entry.quantity << "\n";
-        }
+        as << "[" << act << "][" << side << "] "
+           << "Lvl " << (int)entry.price_level 
+           << " | Price: " << get_formatted_price(entry.price_sign, entry.price, entry.decimal_locator)
+           << " | Qty: " << entry.quantity << "\n";
     }
+    
     as << "====================================";
     Logger::getInstance().log(as.str());
 }
@@ -174,11 +166,8 @@ void on_snapshot(const I083_Packet& pkt) {
     if (pkt.no_md_entries > 0) {
         std::stringstream as;
         as << "=== Analyzed Snapshot Content ===\n";
-
-        for (size_t i = 0; i < pkt.entries.size(); ++i) {
-            const auto& entry = pkt.entries[i];
-
-            // Entry Type
+            for (const auto& entry : pkt.entries) {
+                // Entry Type
             std::string type_str;
             switch(entry.entry_type) {
                 case '0': type_str = "BID"; break;
@@ -192,17 +181,16 @@ void on_snapshot(const I083_Packet& pkt) {
             if (pkt.calculated_flag == '1') {
                 if (entry.price == 999999999) price_display = "Market";
                 else if (entry.price == 999999999 && entry.price_sign == '-') price_display = "Market";
-                else price_display = get_full_price(entry.price_sign, entry.price);
+                else price_display = get_formatted_price(entry.price_sign, entry.price, entry.decimal_locator);
             } else {
-                price_display = get_full_price(entry.price_sign, entry.price);
+                price_display = get_formatted_price(entry.price_sign, entry.price, entry.decimal_locator);
             }
-
-            for (const auto& entry : pkt.entries) {
-                as << "Level " << (int)entry.price_level 
-                << " | Price: " << get_formatted_price(entry.price_sign, entry.price, entry.decimal_locator)
-                << " | Qty: " << entry.quantity << "\n";
+                as << "[" << type_str << "] "
+                   << "Level " << (int)entry.price_level 
+                   << " | Price: " << price_display  
+                   << " | Qty: " << entry.quantity << "\n";
             }
-        }
+        
         as << "==================================";
         Logger::getInstance().log(as.str());
     }
