@@ -205,7 +205,7 @@ def send_udp_packet(packet, ip, port):
 
 if __name__ == "__main__":
     target_ip = "127.0.0.1"
-    target_port = 10000
+    target_port = 14000
 
     packets = [
          create_packet_format_I024_TAIFEX(), create_packet_format_I081_TAIFEX(), create_packet_format_I083_TAIFEX()
