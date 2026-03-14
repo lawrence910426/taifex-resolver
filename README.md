@@ -1,37 +1,91 @@
 # taifex-resolver
 
-`taifex-resolver` is a high-performance C++ utility designed to parse Taiwan Futures Exchange (TAIFEX) binary market data packets. It supports **I024 (Trade)**, **I081 (Incremental Update)**, and **I083 (Snapshot)** formats.
+For those operating in IDC/Colo environments, directly consuming UDP packets from the Taiwan Futures Exchange (TAIFEX) can be significantly faster than using traditional APIs to fetch market data. To facilitate this, a high-performance library is required to parse and decode these binary packets efficiently.
+
+This utility is designed to handle TAIFEX real-time market data, focusing on **I024 (Trade)**, **I081 (Incremental Update)**, and **I083 (Snapshot)** formats.
 
 ---
 
-## Quick Start
+## Prerequisites and dependencies
 
-### 1. Build the C++ Resolver
-Run the following command in the project root directory. The **-O3** optimization flag is enabled to ensure maximum performance for high-frequency market data processing, linking the system thread library.
+```
+sudo apt install python3 python3-pip python3-dev build-essential cmake -y 
+```
 
-* **Build Command:**
-    ```bash
-    g++ -O3 -Wall -std=c++17 \
-        -I ./include \
-        example/taifex_resolver_interface.cc \
-        src/parser.cc \
-        -o example/taifex_resolver_app \
-        -lpthread
-    ```
+---
 
-### 2. Run the Service
-Once compiled, start the resolver to listen on a specific UDP port (default is 14000). The program will run continuously until a termination signal (Ctrl+C) is received.
+## Build and Install
 
-* **Execution Command:**
-    ```bash
-    ./example/taifex_resolver_app -port 14000
-    ```
+Run the following commands in the project root directory. The build process utilizes CMake to ensure all dependencies and threading libraries are correctly linked.
 
-### 3. Extract and Replay Data (Offline)
-The utility located in the `fix/` directory extracts data from **offline pcap files** and simulates UDP traffic towards the resolver. This is ideal for offline backtesting and logic verification during development.
+```
+mkdir -p build && cd build
+cmake ..
+make -j$(nproc)
+```
 
-* **Execution Path:**
-    ```bash
-    cd fix
-    python quick_send.py
-    ```
+---
+
+## Usage (C/C++)
+
+```
+#include "parser.h"
+#include <iostream>
+
+void handle_packet(const Packet& packet) {
+    // Print basic information from the TAIFEX packet
+    std::cout << "Received TAIFEX Packet:" << std::endl;
+    std::cout << "Product ID: " << packet.prod_id << std::endl;
+    std::cout << "Message Type: " << packet.msg_type << std::endl;
+    std::cout << "Message Seq: " << packet.msg_seq << std::endl;
+}
+
+int main() {
+    const int port = 14000;
+    Parser parser;
+    parser.start_loop(port, handle_packet);
+    parser.end_loop();
+    return 0;
+}
+
+Refer to our [example](./example/taifex_resolver_interface.cc).
+```
+
+---
+
+## Testing
+
+Navigate to the root directory of this repository and execute the following commands:
+
+```
+cd test
+bash bash.sh
+```
+
+This script initiates the test suite using Docker to ensure a clean environment for network simulation.
+
+### Test Setup
+
+The test environment utilizes two main components:
+1. Parser Container: Runs the resolver to decode incoming TAIFEX UDP packets.
+2. Mocker (TAIFEX_mocker.py): Simulates the exchange by replaying packets towards the parser.
+
+You should go into the Docker container to run the test and observe the real-time decoding.
+
+### Run the C++ example
+
+Run the C++ example in standard listening mode. In a separate terminal, you can follow the logs: tail -f build/logger/taifex_parser.log.
+
+```
+cd build
+./taifex_resolver_cpp -port 14000
+```
+
+### Offline Data Replay
+
+For development and logic verification without a live feed, you can use the utility in the fix/ directory to simulate traffic from pcap sources.
+
+```
+cd fix
+python3 quick_send.py
+```
