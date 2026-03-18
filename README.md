@@ -81,11 +81,25 @@ cd build
 ./taifex_resolver_cpp -port 14000
 ```
 
-### Offline Data Replay
+### Multicast
 
-For development and logic verification without a live feed, you can use the utility in the fix/ directory to simulate traffic from pcap sources.
+When both `-multicast` and `-iface` flags are provided, the parser will automatically join the specified multicast group on the given network interface. No additional setup is required — the IGMP join is handled internally.
 
 ```
-cd fix
-python3 quick_send.py
+./taifex_resolver_cpp -port 14000 -multicast <multicast_group_ip> -iface <interface_ip>
+```
+
+For example, to listen on interface `127.0.0.1` for multicast group `225.0.140.140`:
+
+```
+./taifex_resolver_cpp -port 14000 -multicast 225.0.140.140 -iface 127.0.0.1 -port 14000
+```
+
+### Offline Data Replay
+
+For development and logic verification without a live feed, you can use the utility in the helpers/ directory to simulate traffic from pcap sources.
+
+```
+cd helpers
+python3 send_pcap_without_multicast.py
 ```

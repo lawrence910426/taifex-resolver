@@ -205,13 +205,22 @@ int main(int argc, char* argv[]) {
 
     TaifexParser parser;
     int port = 14000; // Default TAIFEX UDP port
+    std::string multicast_group;
+    std::string interface_ip;
 
-    // Simple command-line argument parsing
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "-port" && i + 1 < argc) {
             port = std::stoi(argv[++i]);
+        } else if (arg == "-multicast" && i + 1 < argc) {
+            multicast_group = argv[++i];
+        } else if (arg == "-iface" && i + 1 < argc) {
+            interface_ip = argv[++i];
         }
+    }
+
+    if (!multicast_group.empty() && !interface_ip.empty()) {
+        parser.set_multicast(multicast_group, interface_ip);
     }
 
     parser.start_loop(
@@ -222,6 +231,10 @@ int main(int argc, char* argv[]) {
     );
 
     std::cout << "TAIFEX Parser Service started on port " << port << std::endl;
+    if (!multicast_group.empty() && !interface_ip.empty()) {
+        std::cout << "Multicast: group=" << multicast_group
+                  << " iface=" << interface_ip << std::endl;
+    }
     std::cout << "Logs are being written to taifex_parser.log. Press Ctrl+C to exit." << std::endl;
 
     // Main execution thread stays here until interrupted

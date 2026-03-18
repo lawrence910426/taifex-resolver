@@ -110,7 +110,7 @@ public:
 
     void start_loop(int port, I024Callback cb024, I081Callback cb81, I083Callback cb83) ;
     void end_loop() ;
-    // void set_multicast(const std::string& group, const std::string& iface_ip) {};
+    void set_multicast(const std::string& group, const std::string& iface_ip);
 
 private:
     void receive_loop(int port) ;
@@ -134,6 +134,10 @@ private:
     I083Callback on_i083;
 
     int sockfd = -1;
+    bool use_multicast = false;
+    std::string multicast_group;
+    std::string interface_ip;
+
     static constexpr uint8_t  ESC_CODE = 0x1B;
     static constexpr size_t   HEADER_SIZE = 18; // Without ESC
 };

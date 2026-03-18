@@ -1,12 +1,19 @@
 #include "parser.h"
 #include <iostream>
 #include <cstring>
+#include <cerrno>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <sstream>
 #include <algorithm>
 
 TaifexParser::TaifexParser() : running(false), sockfd(-1) {}
+
+void TaifexParser::set_multicast(const std::string& group, const std::string& iface_ip) {
+    use_multicast = true;
+    multicast_group = group;
+    interface_ip = iface_ip;
+}
 
 TaifexParser::~TaifexParser() {
     end_loop();
@@ -74,17 +81,30 @@ void TaifexParser::receive_loop(int port) {
         return;
     }
 
-    // struct ip_mreq mreq;
-    // mreq.imr_multiaddr.s_addr = inet_addr("225.0.140.140"); 
-    // mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+    if (use_multicast) {
+        struct ip_mreq mreq{};
+        mreq.imr_multiaddr.s_addr = inet_addr(multicast_group.c_str());
+        mreq.imr_interface.s_addr = inet_addr(interface_ip.c_str());
 
-    // if (setsockopt(sockfd, IPPROTO_IP, IP_ADD_MEMBERSHIP, (char *)&mreq, sizeof(mreq)) < 0) {
-    //     std::cerr << "[ERROR] Join Multicast Group Failed" << std::endl;
-    // } else {
-    //     std::cerr << "[INFO] Joined Multicast Group: 225.0.140.140" << std::endl;
-    // }
+        std::cerr << "[INFO] Attempting to join multicast group " << multicast_group
+                  << " on interface " << interface_ip << std::endl;
 
-    // std::cerr << ">>> [SERVER LIVE] Listening on UDP " << port << " <<<" << std::endl;
+        if (setsockopt(sockfd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+            std::cerr << "[ERROR] Failed to join multicast group: " << strerror(errno) << std::endl;
+            close(sockfd);
+            sockfd = -1;
+            return;
+        }
+
+        struct in_addr local_interface{};
+        local_interface.s_addr = inet_addr(interface_ip.c_str());
+        if (setsockopt(sockfd, IPPROTO_IP, IP_MULTICAST_IF, &local_interface, sizeof(local_interface)) < 0) {
+            std::cerr << "[ERROR] Failed to set multicast interface: " << strerror(errno) << std::endl;
+            close(sockfd);
+            sockfd = -1;
+            return;
+        }
+    }
 
     uint8_t buffer[4096];
     while (running) {
@@ -92,7 +112,6 @@ void TaifexParser::receive_loop(int port) {
         socklen_t addr_len = sizeof(client_addr);
         ssize_t len = recvfrom(sockfd, buffer, sizeof(buffer), 0, (struct sockaddr*)&client_addr, &addr_len);
         if (len > 0) {
-            
             size_t start_pos = 0;
             for (size_t i = 0; i < (size_t)len - 1; i++) {
                 if (buffer[i] == 0x0D && buffer[i + 1] == 0x0A) {
