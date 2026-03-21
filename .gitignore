@@ -1,0 +1,49 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Static libraries
+*.gch
+*.pch
+*.lib
+*.a
+*.la
+*.lo
+
+# Shared libraries (DLLs)
+*.dll
+*.so
+*.so.*
+*.dylib
+*.exe
+
+# CMake artifacts
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/ ;
+cmake_install.cmake
+install_manifest.txt
+Makefile
+_CPack_Packages/
+CPackConfig.cmake
+CPackSourceConfig.cmake
+
+# Build directory (where your binaries and libs are gathered)
+build/
+
+# IDE - VS Code
+.vscode/
+.history/
+*.code-workspace
+
+# Log files
+*.log
+
+# Project specific binaries
+example/taifex_resolver_app
+taifex_resolver_cpp
