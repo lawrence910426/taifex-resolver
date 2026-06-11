@@ -53,3 +53,27 @@ add_custom_command(TARGET parser_static POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:parser_static> "${CMAKE_SOURCE_DIR}/build/"
     COMMENT "Copying parser_static library to ${CMAKE_SOURCE_DIR}/build/"
 )
+
+# ----------------------------------------------------------------------------
+# 6. Optional Python bindings (pybind11)
+# ----------------------------------------------------------------------------
+# Enabled by setup.py (`-DTAIFEX_BUILD_PYTHON=ON`) so a plain `cmake ..` from
+# the build/ directory keeps producing only the C++ artifacts.
+option(TAIFEX_BUILD_PYTHON "Build the taifex_udp_resolver Python module" OFF)
+
+if(TAIFEX_BUILD_PYTHON)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/extern/pybind11/CMakeLists.txt")
+        add_subdirectory(extern/pybind11)
+    else()
+        find_package(pybind11 CONFIG REQUIRED)
+    endif()
+
+    pybind11_add_module(taifex_udp_resolver src/pybind.cpp)
+    target_include_directories(taifex_udp_resolver PRIVATE include)
+    target_link_libraries(taifex_udp_resolver PRIVATE parser_static Threads::Threads)
+
+    if(DEFINED VERSION_INFO)
+        target_compile_definitions(taifex_udp_resolver
+                                   PRIVATE VERSION_INFO=${VERSION_INFO})
+    endif()
+endif()

@@ -90,19 +90,15 @@ void TaifexParser::receive_loop(int port) {
                   << " on interface " << interface_ip << std::endl;
 
         if (setsockopt(sockfd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
-            std::cerr << "[ERROR] Failed to join multicast group: " << strerror(errno) << std::endl;
-            close(sockfd);
-            sockfd = -1;
-            return;
+            std::cerr << "[WARN] IP_ADD_MEMBERSHIP failed: " << strerror(errno)
+                      << " — continuing without IGMP join" << std::endl;
         }
 
         struct in_addr local_interface{};
         local_interface.s_addr = inet_addr(interface_ip.c_str());
         if (setsockopt(sockfd, IPPROTO_IP, IP_MULTICAST_IF, &local_interface, sizeof(local_interface)) < 0) {
-            std::cerr << "[ERROR] Failed to set multicast interface: " << strerror(errno) << std::endl;
-            close(sockfd);
-            sockfd = -1;
-            return;
+            std::cerr << "[WARN] IP_MULTICAST_IF failed: " << strerror(errno)
+                      << " — continuing" << std::endl;
         }
     }
 
@@ -119,6 +115,11 @@ void TaifexParser::receive_loop(int port) {
                     start_pos = i + 2;
                 }
             }
+        } else if (len < 0) {
+            if (errno != EINTR && errno != EBADF) {
+                std::cerr << "[ERROR] recvfrom error: " << strerror(errno) << std::endl;
+            }
+            break;
         }
     }
 }

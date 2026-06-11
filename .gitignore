@@ -47,3 +47,10 @@ build/
 # Project specific binaries
 example/taifex_resolver_app
 taifex_resolver_cpp
+
+# Python packaging artifacts
+*.egg-info/
+*.egg
+dist/
+__pycache__/
+.pytest_cache/
