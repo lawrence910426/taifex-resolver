@@ -196,6 +196,50 @@ void on_snapshot(const I083_Packet& pkt) {
     }
 }
 
+void on_refresh(const I084_Packet& pkt) {
+    std::stringstream ss;
+    ss << "Received Packet (I084 - Snapshot Refresh):\n"
+       << "----------------------------------------\n"
+       << "Message Kind       : " << pkt.header.message_kind << " (I084)\n"
+       << "Information Time   : " << pkt.header.info_time << "\n"
+       << "Channel Seq        : " << pkt.header.channel_seq << "\n"
+       << "Message Type       : " << pkt.message_type << "\n";
+
+    switch (pkt.message_type) {
+        case 'A': ss << "Type               : Refresh Begin, LAST-SEQ=" << pkt.last_seq << "\n"; break;
+        case 'Z': ss << "Type               : Refresh Complete, LAST-SEQ=" << pkt.last_seq << "\n"; break;
+        case 'O': ss << "Type               : Order Data, NO-ENTRIES=" << (int)pkt.no_entries << "\n"; break;
+        default:  ss << "Type               : " << pkt.message_type << " (unparsed)\n"; break;
+    }
+    Logger::getInstance().log(ss.str());
+
+    if (pkt.message_type == 'O') {
+        std::stringstream as;
+        as << "=== Analyzed Snapshot Refresh ===\n";
+        for (const auto& prod : pkt.products) {
+            as << "Prod ID            : " << prod.prod_id
+               << " | LAST-PROD-MSG-SEQ: " << prod.last_prod_msg_seq
+               << " | NO-MD-ENTRIES: " << (int)prod.no_md_entries
+               << (prod.no_md_entries == 0 ? " (Empty Book)" : "") << "\n";
+            for (const auto& entry : prod.entries) {
+                std::string type_str;
+                switch (entry.entry_type) {
+                    case '0': type_str = "BID"; break;
+                    case '1': type_str = "ASK"; break;
+                    case 'E': type_str = "Implied BID"; break;
+                    case 'F': type_str = "Implied ASK"; break;
+                    default:  type_str = "Unknown";
+                }
+                as << "  [" << type_str << "] Level " << (int)entry.price_level
+                   << " | Price: " << get_formatted_price(entry.price_sign, entry.price, entry.decimal_locator)
+                   << " | Qty: " << entry.quantity << "\n";
+            }
+        }
+        as << "==================================";
+        Logger::getInstance().log(as.str());
+    }
+}
+
 int main(int argc, char* argv[]) {
     // Register signal for graceful exit
     std::signal(SIGINT, signal_handler);
@@ -224,10 +268,11 @@ int main(int argc, char* argv[]) {
     }
 
     parser.start_loop(
-        port, 
+        port,
         on_trade_match,  // I024 Callback
         on_incremental,  // I081 Callback
-        on_snapshot      // I083 Callback
+        on_snapshot,     // I083 Callback
+        on_refresh       // I084 Callback
     );
 
     std::cout << "TAIFEX Parser Service started on port " << port << std::endl;

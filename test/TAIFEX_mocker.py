@@ -8,6 +8,13 @@ def calculate_checksum(data):
         checksum ^= byte
     return checksum
 
+def _bcd(value, nbytes):
+    """Pack a non-negative int as PACK BCD across `nbytes` (2 digits/byte)."""
+    digits = str(value).zfill(nbytes * 2)
+    if len(digits) > nbytes * 2:
+        raise ValueError(f"{value} does not fit in {nbytes} BCD bytes")
+    return bytes((int(digits[i]) << 4) | int(digits[i + 1]) for i in range(0, len(digits), 2))
+
 def create_packet_format_I024_TAIFEX():
     # ESC-CODE (ASCII 27)
     esc_code = bytes([0x1B]) 
@@ -193,6 +200,49 @@ def create_packet_format_I083_TAIFEX():
     
     return esc_code + content_to_check + checksum + terminal_code
 
+def _build_i084(channel_seq, body):
+    """Wrap an I084 body (MESSAGE-TYPE byte + type-specific fields) with the
+    18-byte common header (MESSAGE-KIND 'C'), checksum and terminal code."""
+    esc_code = bytes([0x1B])
+    header = (
+        b'\x34' +                      # 1.1 TRANSMISSION-CODE: '4' (snapshot group; cosmetic)
+        b'\x43' +                      # 1.2 MESSAGE-KIND: 'C' (I084 Snapshot Refresh)
+        b'\x13\x15\x40\x00\x00\x00' +  # 1.3 INFORMATION-TIME: 13:15:40.000000 (BCD)
+        _bcd(1, 2) +                   # 1.4 CHANNEL-ID: 1 (BCD)
+        _bcd(channel_seq, 5) +         # 1.5 CHANNEL-SEQ (BCD)
+        _bcd(1, 1) +                   # 1.6 VERSION-NO: 1 (BCD)
+        _bcd(len(body), 2)            # 1.7 BODY-LENGTH (BCD)
+    )
+    content = header + body
+    checksum = bytes([calculate_checksum(content)])  # 3.1 CHECK-SUM: X(1)
+    terminal_code = b'\x0D\x0A'                       # 4.1 TERMINAL-CODE: HEX 0D0A
+    return esc_code + content + checksum + terminal_code
+
+def create_packet_format_I084_A_TAIFEX():
+    # MESSAGE-TYPE 'A' (Refresh Begin): LAST-SEQ 9(10) PACK BCD 5B.
+    # Per spec the Refresh Begin CHANNEL-SEQ is fixed at 1.
+    body = b'\x41' + _bcd(1000, 5)               # 'A', LAST-SEQ=1000
+    return _build_i084(channel_seq=1, body=body)
+
+def create_packet_format_I084_O_TAIFEX():
+    # MESSAGE-TYPE 'O' (Order Data): NO-ENTRIES, then per-product order book.
+    product = (
+        b'TXF202603           ' +                # PROD-ID X(20)
+        _bcd(248, 5) +                           # LAST-PROD-MSG-SEQ 9(10)
+        _bcd(2, 1) +                             # NO-MD-ENTRIES: 2
+        # MD entry 1: Best Bid @ 12000.500 x10 level 1
+        b'\x30' + b'\x30' + _bcd(12000500, 5) + _bcd(10, 4) + _bcd(1, 1) +
+        # MD entry 2: Best Ask @ 12000.600 x8 level 1
+        b'\x31' + b'\x30' + _bcd(12000600, 5) + _bcd(8, 4) + _bcd(1, 1)
+    )
+    body = b'\x4F' + _bcd(1, 1) + product        # 'O', NO-ENTRIES=1
+    return _build_i084(channel_seq=2, body=body)
+
+def create_packet_format_I084_Z_TAIFEX():
+    # MESSAGE-TYPE 'Z' (Refresh Complete): LAST-SEQ 9(10) PACK BCD 5B.
+    body = b'\x5A' + _bcd(1005, 5)               # 'Z', LAST-SEQ=1005
+    return _build_i084(channel_seq=3, body=body)
+
 def send_udp_packet(packet, ip, port):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -205,15 +255,25 @@ def send_udp_packet(packet, ip, port):
 
 if __name__ == "__main__":
     target_ip = "127.0.0.1"
-    target_port = 14000
+    realtime_port = 14000   # Ch1/Ch2 即時行情 — I024/I081/I083
+    snapshot_port = 14700   # Ch13/Ch14 行情快照更新 — I084
 
+    # (packet, dst_port): realtime kinds go to the realtime port, the I084
+    # snapshot-refresh kinds (A/O/Z) go to the snapshot port — mirroring the
+    # per-channel capture/processing split.
     packets = [
-         create_packet_format_I024_TAIFEX(), create_packet_format_I081_TAIFEX(), create_packet_format_I083_TAIFEX()
+        (create_packet_format_I024_TAIFEX(),   realtime_port),
+        (create_packet_format_I081_TAIFEX(),   realtime_port),
+        (create_packet_format_I083_TAIFEX(),   realtime_port),
+        (create_packet_format_I084_A_TAIFEX(), snapshot_port),
+        (create_packet_format_I084_O_TAIFEX(), snapshot_port),
+        (create_packet_format_I084_Z_TAIFEX(), snapshot_port),
     ]
     packet_index = 0
 
     while True:
-        print(f"Sending packet {packet_index + 1}", flush=True)
-        send_udp_packet(packets[packet_index], target_ip, target_port)
+        packet, port = packets[packet_index]
+        print(f"Sending packet {packet_index + 1} -> {target_ip}:{port}", flush=True)
+        send_udp_packet(packet, target_ip, port)
         packet_index = (packet_index + 1) % len(packets)  # Round-robin
         time.sleep(1)

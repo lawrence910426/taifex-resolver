@@ -96,6 +96,26 @@ struct I083_Packet {
     Footer footer;
 };
 
+// I084 'O' (Order Data): one product block, repeated NO-ENTRIES times.
+struct I084Product {
+    char prod_id[21];           // X(20)
+    uint32_t last_prod_msg_seq; // 9(10) - BCD 5 bytes (商品行情訊息末筆處理序號)
+    uint8_t no_md_entries;      // 9(2)  - BCD 1 byte (0 => empty book)
+    std::vector<MDEntry> entries;
+};
+
+// I084: Snapshot Refresh (快照更新訊息), message_kind 'C'. The 1-byte
+// MESSAGE-TYPE selects the body: 'A'/'Z' carry LAST-SEQ, 'O' carries the
+// repeated per-product order book. 'S'/'P' are left unparsed (out of scope).
+struct I084_Packet {
+    Header header;
+    char message_type;          // X(1) - 'A','O','S','P','Z'
+    uint32_t last_seq;          // 9(10) - BCD 5 bytes ('A'/'Z'; 0 otherwise)
+    uint8_t no_entries;         // 9(2)  - BCD 1 byte ('O' product count; 0 otherwise)
+    std::vector<I084Product> products; // 'O' only
+    Footer footer;
+};
+
 // --- 3. Parser Class ---
 
 class TaifexParser {
@@ -107,8 +127,9 @@ public:
     using I024Callback = std::function<void(const I024_Packet&)>;
     using I081Callback = std::function<void(const I081_Packet&)>;
     using I083Callback = std::function<void(const I083_Packet&)>;
+    using I084Callback = std::function<void(const I084_Packet&)>;
 
-    void start_loop(int port, I024Callback cb024, I081Callback cb81, I083Callback cb83) ;
+    void start_loop(int port, I024Callback cb024, I081Callback cb81, I083Callback cb83, I084Callback cb84) ;
     void end_loop() ;
     void set_multicast(const std::string& group, const std::string& iface_ip);
 
@@ -121,6 +142,7 @@ private:
     bool handle_i024(const uint8_t* data, const Header& header);
     bool handle_i081(const uint8_t* data, const Header& header);
     bool handle_i083(const uint8_t* data, const Header& header);
+    bool handle_i084(const uint8_t* data, const Header& header);
 
     // Utility
     uint64_t bcd_to_uint(const uint8_t* bcd, size_t len);
@@ -132,6 +154,7 @@ private:
     I024Callback on_i024;
     I081Callback on_i081;
     I083Callback on_i083;
+    I084Callback on_i084;
 
     int sockfd = -1;
     bool use_multicast = false;

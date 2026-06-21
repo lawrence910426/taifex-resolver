@@ -120,6 +120,28 @@ static void bind_i083(py::module_ &m) {
         .def_readwrite("footer", &I083_Packet::footer);
 }
 
+static void bind_i084_product(py::module_ &m) {
+    py::class_<I084Product>(m, "I084Product")
+        .def(py::init<>())
+        .def_property("prod_id",
+                      fixed_char_getter<21>(&I084Product::prod_id),
+                      fixed_char_setter<21>(&I084Product::prod_id))
+        .def_readwrite("last_prod_msg_seq", &I084Product::last_prod_msg_seq)
+        .def_readwrite("no_md_entries", &I084Product::no_md_entries)
+        .def_readwrite("entries", &I084Product::entries);
+}
+
+static void bind_i084(py::module_ &m) {
+    py::class_<I084_Packet>(m, "I084Packet")
+        .def(py::init<>())
+        .def_readwrite("header", &I084_Packet::header)
+        .def_readwrite("message_type", &I084_Packet::message_type)
+        .def_readwrite("last_seq", &I084_Packet::last_seq)
+        .def_readwrite("no_entries", &I084_Packet::no_entries)
+        .def_readwrite("products", &I084_Packet::products)
+        .def_readwrite("footer", &I084_Packet::footer);
+}
+
 PYBIND11_MODULE(taifex_udp_resolver, m) {
     m.doc() = "TAIFEX UDP Resolver (Python interface)";
 
@@ -130,6 +152,8 @@ PYBIND11_MODULE(taifex_udp_resolver, m) {
     bind_i024(m);
     bind_i081(m);
     bind_i083(m);
+    bind_i084_product(m);
+    bind_i084(m);
 
     py::class_<TaifexParser>(m, "Parser")
         .def(py::init<>())
@@ -141,13 +165,15 @@ PYBIND11_MODULE(taifex_udp_resolver, m) {
                 int port,
                 std::function<void(const I024_Packet &)> cb_i024,
                 std::function<void(const I081_Packet &)> cb_i081,
-                std::function<void(const I083_Packet &)> cb_i083) {
-                 self.start_loop(port, cb_i024, cb_i081, cb_i083);
+                std::function<void(const I083_Packet &)> cb_i083,
+                std::function<void(const I084_Packet &)> cb_i084) {
+                 self.start_loop(port, cb_i024, cb_i081, cb_i083, cb_i084);
              },
              py::arg("port"),
              py::arg("cb_i024"),
              py::arg("cb_i081"),
              py::arg("cb_i083"),
+             py::arg("cb_i084"),
              "Start the UDP receive loop. Each callback is invoked from the\n"
              "receive thread; the GIL is acquired automatically by pybind11.")
         .def("end_loop", &TaifexParser::end_loop, "Stop the parsing loop")

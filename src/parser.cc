@@ -45,12 +45,13 @@ bool TaifexParser::verify_checksum(const uint8_t* data, size_t len) {
     return calculated_xor == data[len - 3];
 }
 
-void TaifexParser::start_loop(int port, I024Callback cb24, I081Callback cb81, I083Callback cb83) {
+void TaifexParser::start_loop(int port, I024Callback cb24, I081Callback cb81, I083Callback cb83, I084Callback cb84) {
     if (running) return;
     running = true;
     on_i024 = cb24;
     on_i081 = cb81;
     on_i083 = cb83;
+    on_i084 = cb84;
     recv_thread = std::thread(&TaifexParser::receive_loop, this, port);
 }
 
@@ -141,9 +142,10 @@ void TaifexParser::process_raw_data(const uint8_t* data, size_t length) {
     header.body_len = (uint16_t)bcd_to_uint(data + 17, 2);
 
     switch (header.message_kind) {
-        case 'D': handle_i024(data, header); break; 
-        case 'A': handle_i081(data, header); break; 
-        case 'B': handle_i083(data, header); break; 
+        case 'D': handle_i024(data, header); break;
+        case 'A': handle_i081(data, header); break;
+        case 'B': handle_i083(data, header); break;
+        case 'C': handle_i084(data, header); break;
     }
 }
 
@@ -274,5 +276,69 @@ bool TaifexParser::handle_i083(const uint8_t* data, const Header& header) {
     }
 
     if (on_i083) on_i083(pkt);
+    return true;
+}
+
+// --- Handler: I084 (Snapshot Refresh) ---
+// MESSAGE-TYPE at offset 19 selects the body. We resolve 'A'/'O'/'Z'; 'S'/'P'
+// (statistics / product status) are delivered header+type only (out of scope).
+
+bool TaifexParser::handle_i084(const uint8_t* data, const Header& header) {
+    I084_Packet pkt;
+    pkt.header = header;
+    pkt.last_seq = 0;
+    pkt.no_entries = 0;
+    size_t offset = 19;
+
+    pkt.message_type = data[offset++];
+
+    switch (pkt.message_type) {
+        case 'A':   // Refresh Begin
+        case 'Z':   // Refresh Complete
+            pkt.last_seq = (uint32_t)bcd_to_uint(data + offset, 5);
+            offset += 5;
+            break;
+
+        case 'O': { // Order Data: NO-ENTRIES products, each a small order book
+            pkt.no_entries = (uint8_t)bcd_to_uint(data + offset, 1);
+            offset += 1;
+
+            for (int p = 0; p < pkt.no_entries; ++p) {
+                I084Product prod;
+                memcpy(prod.prod_id, data + offset, 20);
+                prod.prod_id[20] = '\0';
+                offset += 20;
+
+                prod.last_prod_msg_seq = (uint32_t)bcd_to_uint(data + offset, 5);
+                offset += 5;
+
+                prod.no_md_entries = (uint8_t)bcd_to_uint(data + offset, 1);
+                offset += 1;
+
+                for (int i = 0; i < prod.no_md_entries; ++i) {
+                    MDEntry entry;
+                    entry.update_action = ' '; // Not applicable for snapshot
+                    entry.entry_type = data[offset++];
+                    entry.price_sign = data[offset++];
+                    entry.price = bcd_to_uint(data + offset, 5);
+                    entry.decimal_locator = 3;
+                    offset += 5;
+                    entry.quantity = (uint32_t)bcd_to_uint(data + offset, 4);
+                    offset += 4;
+                    entry.price_level = (uint8_t)bcd_to_uint(data + offset, 1);
+                    offset += 1;
+                    prod.entries.push_back(entry);
+                }
+                pkt.products.push_back(prod);
+            }
+            break;
+        }
+
+        default:
+            // 'S' / 'P' — body layout not parsed; deliver header + type marker.
+            break;
+    }
+
+    if (on_i084) on_i084(pkt);
     return true;
 }
