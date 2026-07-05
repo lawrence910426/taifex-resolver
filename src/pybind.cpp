@@ -3,6 +3,7 @@
 #include <pybind11/stl.h>
 #include <cstring>
 #include "parser.h"
+#include "order_book.h"
 
 namespace py = pybind11;
 
@@ -93,6 +94,25 @@ static void bind_i024(py::module_ &m) {
         .def_readwrite("footer", &I024_Packet::footer);
 }
 
+static void bind_i025(py::module_ &m) {
+    py::class_<I025_Packet>(m, "I025Packet")
+        .def(py::init<>())
+        .def_readwrite("header", &I025_Packet::header)
+        .def_property("prod_id",
+                      fixed_char_getter<21>(&I025_Packet::prod_id),
+                      fixed_char_setter<21>(&I025_Packet::prod_id))
+        .def_readwrite("prod_msg_seq", &I025_Packet::prod_msg_seq)
+        .def_readwrite("day_high_price_sign", &I025_Packet::day_high_price_sign)
+        .def_readwrite("day_high_price", &I025_Packet::day_high_price)
+        .def_readwrite("day_low_price_sign", &I025_Packet::day_low_price_sign)
+        .def_readwrite("day_low_price", &I025_Packet::day_low_price)
+        .def_property("show_time",
+                      fixed_char_getter<16>(&I025_Packet::show_time),
+                      fixed_char_setter<16>(&I025_Packet::show_time))
+        .def_readwrite("decimal_locator", &I025_Packet::decimal_locator)
+        .def_readwrite("footer", &I025_Packet::footer);
+}
+
 static void bind_i081(py::module_ &m) {
     py::class_<I081_Packet>(m, "I081Packet")
         .def(py::init<>())
@@ -142,6 +162,77 @@ static void bind_i084(py::module_ &m) {
         .def_readwrite("footer", &I084_Packet::footer);
 }
 
+static void bind_order_book_level(py::module_ &m) {
+    py::class_<OrderBookLevel>(m, "OrderBookLevel")
+        .def(py::init<>())
+        .def_readwrite("valid", &OrderBookLevel::valid)
+        .def_readwrite("price_sign", &OrderBookLevel::price_sign)
+        .def_readwrite("price", &OrderBookLevel::price)
+        .def_readwrite("quantity", &OrderBookLevel::quantity);
+}
+
+static void bind_order_book(py::module_ &m) {
+    py::class_<OrderBook>(m, "OrderBook")
+        .def(py::init<>())
+        .def_property("prod_id",
+                      fixed_char_getter<21>(&OrderBook::prod_id),
+                      fixed_char_setter<21>(&OrderBook::prod_id))
+        .def_readwrite("last_prod_msg_seq", &OrderBook::last_prod_msg_seq)
+        .def_readwrite("is_stale", &OrderBook::is_stale)
+        .def_readwrite("has_snapshot", &OrderBook::has_snapshot)
+        .def_property("info_time",
+                      fixed_char_getter<16>(&OrderBook::info_time),
+                      fixed_char_setter<16>(&OrderBook::info_time))
+        .def_readwrite("decimal_locator", &OrderBook::decimal_locator)
+        // std::array<OrderBookLevel, 5> converts to a Python list copy.
+        .def_readwrite("bids", &OrderBook::bids)
+        .def_readwrite("asks", &OrderBook::asks)
+        .def_readwrite("derived_bids", &OrderBook::derived_bids)
+        .def_readwrite("derived_asks", &OrderBook::derived_asks);
+}
+
+static void bind_order_book_manager(py::module_ &m) {
+    // Every method releases the GIL around its C++ body: the manager's mutex
+    // is also taken by the receive threads, and a Python thread must never
+    // block on that mutex while holding the GIL (the receive thread needs the
+    // GIL to deliver callbacks).
+    using GilRelease = py::call_guard<py::gil_scoped_release>;
+    py::class_<OrderBookManager>(m, "OrderBookManager")
+        .def(py::init<>())
+        // Feed methods, for manual composition / tests. In normal use attach
+        // the manager via Parser.set_order_book_manager instead, which also
+        // feeds message headers (I001/I002/CHANNEL-SEQ gap tracking).
+        .def("on_header", &OrderBookManager::on_header, py::arg("header"),
+             GilRelease())
+        .def("on_i024", &OrderBookManager::on_i024, py::arg("pkt"), GilRelease())
+        .def("on_i025", &OrderBookManager::on_i025, py::arg("pkt"), GilRelease())
+        .def("on_i081", &OrderBookManager::on_i081, py::arg("pkt"), GilRelease())
+        .def("on_i083", &OrderBookManager::on_i083, py::arg("pkt"), GilRelease())
+        .def("on_i084", &OrderBookManager::on_i084, py::arg("pkt"), GilRelease())
+        .def("register_callback", &OrderBookManager::register_callback,
+             py::arg("prod_id"), py::arg("callback"), GilRelease(),
+             "Register a per-instrument book callback, e.g. a\n"
+             "handle_futopt_order_book(order_book) function. prod_id is\n"
+             "matched with trailing padding trimmed. In C++ the delivered\n"
+             "reference is valid only during the call (copy to keep); Python\n"
+             "callbacks receive a fresh OrderBook object at the boundary.")
+        .def("register_callback_all", &OrderBookManager::register_callback_all,
+             py::arg("callback"), GilRelease(),
+             "Register a wildcard book callback fired for every instrument.\n"
+             "Same delivery contract as register_callback.")
+        .def("unregister_callbacks", &OrderBookManager::unregister_callbacks,
+             py::arg("prod_id"), GilRelease())
+        .def("unregister_all_callbacks",
+             &OrderBookManager::unregister_all_callbacks, GilRelease())
+        .def("get_book", &OrderBookManager::get_book, py::arg("prod_id"),
+             GilRelease(),
+             "Copy of the current book for the product, or None if unseen.")
+        .def("product_ids", &OrderBookManager::product_ids, GilRelease())
+        .def("reset", &OrderBookManager::reset, GilRelease(),
+             "Clear all books and sequence trackers (I002-equivalent);\n"
+             "delivers a stale-flagged copy of every trusted book first.");
+}
+
 PYBIND11_MODULE(taifex_udp_resolver, m) {
     m.doc() = "TAIFEX UDP Resolver (Python interface)";
 
@@ -150,10 +241,14 @@ PYBIND11_MODULE(taifex_udp_resolver, m) {
     bind_match_data(m);
     bind_md_entry(m);
     bind_i024(m);
+    bind_i025(m);
     bind_i081(m);
     bind_i083(m);
     bind_i084_product(m);
     bind_i084(m);
+    bind_order_book_level(m);
+    bind_order_book(m);
+    bind_order_book_manager(m);
 
     py::class_<TaifexParser>(m, "Parser")
         .def(py::init<>())
@@ -164,20 +259,37 @@ PYBIND11_MODULE(taifex_udp_resolver, m) {
              [](TaifexParser &self,
                 int port,
                 std::function<void(const I024_Packet &)> cb_i024,
+                std::function<void(const I025_Packet &)> cb_i025,
                 std::function<void(const I081_Packet &)> cb_i081,
                 std::function<void(const I083_Packet &)> cb_i083,
                 std::function<void(const I084_Packet &)> cb_i084) {
-                 self.start_loop(port, cb_i024, cb_i081, cb_i083, cb_i084);
+                 self.start_loop(port, cb_i024, cb_i025, cb_i081, cb_i083,
+                                 cb_i084);
              },
              py::arg("port"),
              py::arg("cb_i024"),
+             py::arg("cb_i025"),
              py::arg("cb_i081"),
              py::arg("cb_i083"),
              py::arg("cb_i084"),
-             "Start the UDP receive loop. Each callback is invoked from the\n"
-             "receive thread; the GIL is acquired automatically by pybind11.")
-        .def("end_loop", &TaifexParser::end_loop, "Stop the parsing loop")
+             "Start the UDP receive loop. One callback per message type, in\n"
+             "message-ID order; pass None for any type you do not need. Each\n"
+             "callback is invoked from the receive thread; the GIL is\n"
+             "acquired automatically by pybind11.")
+        // end_loop joins the receive thread, which may be blocked acquiring
+        // the GIL to deliver a callback — the GIL must be released while
+        // waiting or shutdown deadlocks.
+        .def("end_loop", &TaifexParser::end_loop,
+             py::call_guard<py::gil_scoped_release>(),
+             "Stop the parsing loop")
         .def("set_multicast", &TaifexParser::set_multicast,
              py::arg("group"), py::arg("iface_ip"),
-             "Configure the IPv4 multicast group + local interface IP to join.");
+             "Configure the IPv4 multicast group + local interface IP to join.")
+        .def("set_order_book_manager", &TaifexParser::set_order_book_manager,
+             py::arg("manager").none(true), py::keep_alive<1, 2>(),
+             "Forward decoded I024/I025/I081/I083/I084 packets and every\n"
+             "message header to the OrderBookManager (wrapped handle_ mode),\n"
+             "before the raw callbacks fire. Call before start_loop; pass\n"
+             "None to detach. Attach the same manager to the realtime-port\n"
+             "parser and the I084 snapshot-port parser.");
 }

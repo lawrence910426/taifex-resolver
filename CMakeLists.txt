@@ -13,7 +13,7 @@ find_package(Threads REQUIRED)
 
 # 2. Build Target: Parser Object Library
 # Using OBJECT library to avoid redundant compilation for static/shared targets
-add_library(parser_obj OBJECT src/parser.cc)
+add_library(parser_obj OBJECT src/parser.cc src/order_book.cc)
 target_include_directories(parser_obj PRIVATE include)
 set_target_properties(parser_obj PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
@@ -55,7 +55,20 @@ add_custom_command(TARGET parser_static POST_BUILD
 )
 
 # ----------------------------------------------------------------------------
-# 6. Optional Python bindings (pybind11)
+# 6. C++ unit tests (plain assert-based, no framework)
+# ----------------------------------------------------------------------------
+option(TAIFEX_BUILD_TESTS "Build C++ unit tests" ON)
+
+if(TAIFEX_BUILD_TESTS)
+    enable_testing()
+    add_executable(order_book_test test/order_book_test.cc)
+    target_include_directories(order_book_test PRIVATE include)
+    target_link_libraries(order_book_test PRIVATE parser_static Threads::Threads)
+    add_test(NAME order_book_test COMMAND order_book_test)
+endif()
+
+# ----------------------------------------------------------------------------
+# 7. Optional Python bindings (pybind11)
 # ----------------------------------------------------------------------------
 # Enabled by setup.py (`-DTAIFEX_BUILD_PYTHON=ON`) so a plain `cmake ..` from
 # the build/ directory keeps producing only the C++ artifacts.

@@ -1,4 +1,5 @@
 #include "parser.h"
+#include "order_book.h"
 #include <iostream>
 #include <cstring>
 #include <cerrno>
@@ -45,14 +46,19 @@ bool TaifexParser::verify_checksum(const uint8_t* data, size_t len) {
     return calculated_xor == data[len - 3];
 }
 
-void TaifexParser::start_loop(int port, I024Callback cb24, I081Callback cb81, I083Callback cb83, I084Callback cb84) {
+void TaifexParser::start_loop(int port, I024Callback cb24, I025Callback cb25, I081Callback cb81, I083Callback cb83, I084Callback cb84) {
     if (running) return;
     running = true;
     on_i024 = cb24;
+    on_i025 = cb25;
     on_i081 = cb81;
     on_i083 = cb83;
     on_i084 = cb84;
     recv_thread = std::thread(&TaifexParser::receive_loop, this, port);
+}
+
+void TaifexParser::set_order_book_manager(OrderBookManager* mgr) {
+    book_mgr_ = mgr;
 }
 
 void TaifexParser::end_loop() {
@@ -141,8 +147,14 @@ void TaifexParser::process_raw_data(const uint8_t* data, size_t length) {
     header.version_no = (uint8_t)bcd_to_uint(data + 16, 1);
     header.body_len = (uint16_t)bcd_to_uint(data + 17, 2);
 
+    // The order book manager tracks CHANNEL-SEQ over every message on the
+    // channel (including I001 heartbeats, I002 sequence resets and kinds this
+    // parser does not decode), so it is fed each valid header up front.
+    if (book_mgr_) book_mgr_->on_header(header);
+
     switch (header.message_kind) {
         case 'D': handle_i024(data, header); break;
+        case 'E': handle_i025(data, length, header); break;
         case 'A': handle_i081(data, header); break;
         case 'B': handle_i083(data, header); break;
         case 'C': handle_i084(data, header); break;
@@ -201,7 +213,46 @@ bool TaifexParser::handle_i024(const uint8_t* data, const Header& header) {
     pkt.buy_cnt = (uint32_t)bcd_to_uint(data + offset, 4);   offset += 4;
     pkt.sell_cnt = (uint32_t)bcd_to_uint(data + offset, 4);  offset += 4;
 
+    if (book_mgr_) book_mgr_->on_i024(pkt);
     if (on_i024) on_i024(pkt);
+    return true;
+}
+
+// --- Handler: I025 (Intraday Day-High/Low) ---
+// Parsed chiefly because I025 consumes the per-product PROD-MSG-SEQ serial
+// that the order book manager relies on for loss detection.
+
+bool TaifexParser::handle_i025(const uint8_t* data, size_t length, const Header& header) {
+    // Fixed 43-byte body + 19-byte prefix (ESC + header) + 3-byte trailer
+    // (checksum + 0D0A). Shorter segments would be read out of bounds.
+    if (length < 19 + 43 + 3) return false;
+
+    I025_Packet pkt;
+    pkt.header = header;
+    size_t offset = 19;
+
+    memcpy(pkt.prod_id, data + offset, 20);
+    pkt.prod_id[20] = '\0';
+    offset += 20;
+
+    pkt.prod_msg_seq = (uint32_t)bcd_to_uint(data + offset, 5);
+    offset += 5;
+
+    pkt.day_high_price_sign = data[offset++];
+    pkt.day_high_price = bcd_to_uint(data + offset, 5);
+    offset += 5;
+
+    pkt.day_low_price_sign = data[offset++];
+    pkt.day_low_price = bcd_to_uint(data + offset, 5);
+    offset += 5;
+
+    format_bcd_time_to_char(data + offset, pkt.show_time, true);
+    offset += 6;
+
+    pkt.decimal_locator = 2;
+
+    if (book_mgr_) book_mgr_->on_i025(pkt);
+    if (on_i025) on_i025(pkt);
     return true;
 }
 
@@ -237,6 +288,7 @@ bool TaifexParser::handle_i081(const uint8_t* data, const Header& header) {
         pkt.entries.push_back(entry);
     }
 
+    if (book_mgr_) book_mgr_->on_i081(pkt);
     if (on_i081) on_i081(pkt);
     return true;
 }
@@ -275,6 +327,7 @@ bool TaifexParser::handle_i083(const uint8_t* data, const Header& header) {
         pkt.entries.push_back(entry);
     }
 
+    if (book_mgr_) book_mgr_->on_i083(pkt);
     if (on_i083) on_i083(pkt);
     return true;
 }
@@ -339,6 +392,7 @@ bool TaifexParser::handle_i084(const uint8_t* data, const Header& header) {
             break;
     }
 
+    if (book_mgr_) book_mgr_->on_i084(pkt);
     if (on_i084) on_i084(pkt);
     return true;
 }

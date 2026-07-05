@@ -13,10 +13,11 @@
 
 struct Header {
     char transmission_code;  // X(1)
-    char message_kind;       // X(1) - 'A' for I081, 'B' for I083
+    char message_kind;       // X(1) - 'A':I081, 'B':I083, 'C':I084, 'D':I024, 'E':I025,
+                             //        '1':I001 heartbeat, '2':I002 sequence reset
     char info_time[16];   // 9(12) - BCD 6 bytes (HHMMSSuuuuuu)
     uint16_t channel_id;     // 9(4)  - BCD 2 bytes
-    uint32_t channel_seq;    // 9(10) - BCD 5 bytes
+    uint32_t channel_seq;    // 9(10) - BCD 5 bytes (spec caps the value at 4294967295)
     uint8_t version_no;      // 9(2)  - BCD 1 byte
     uint16_t body_len;       // 9(4)  - BCD 2 bytes
 };
@@ -75,6 +76,22 @@ struct I024_Packet {
     Footer footer;           // Checksum and Terminal Code
 };
 
+// I025: Intraday Day-High/Low Price Disclosure. Parsed mainly because it
+// consumes the same per-product PROD-MSG-SEQ serial as I024/I081/I083, which
+// the order book manager needs for loss detection.
+struct I025_Packet {
+    Header header;
+    char prod_id[21];           // X(20)
+    uint32_t prod_msg_seq;      // 9(10) - BCD 5 bytes (spec caps at 4294967295)
+    char day_high_price_sign;   // X(1)  - '0':Positive, '-':Negative
+    uint64_t day_high_price;    // 9(9)  - BCD 5 bytes
+    char day_low_price_sign;    // X(1)
+    uint64_t day_low_price;     // 9(9)  - BCD 5 bytes
+    char show_time[16];         // 9(12) - BCD 6 bytes (HHMMSSuuuuuu)
+    uint8_t decimal_locator = 2;  // traded prices, same treatment as I024
+    Footer footer;
+};
+
 // I081: Incremental Order Book Update
 struct I081_Packet {
     Header header;
@@ -118,6 +135,8 @@ struct I084_Packet {
 
 // --- 3. Parser Class ---
 
+class OrderBookManager;  // see order_book.h
+
 class TaifexParser {
 public:
     TaifexParser() ;
@@ -125,13 +144,23 @@ public:
 
     // Use separate callbacks for different message types
     using I024Callback = std::function<void(const I024_Packet&)>;
+    using I025Callback = std::function<void(const I025_Packet&)>;
     using I081Callback = std::function<void(const I081_Packet&)>;
     using I083Callback = std::function<void(const I083_Packet&)>;
     using I084Callback = std::function<void(const I084_Packet&)>;
 
-    void start_loop(int port, I024Callback cb024, I081Callback cb81, I083Callback cb83, I084Callback cb84) ;
+    // One callback per message type, in message-ID order; pass nullptr for
+    // any type you don't need.
+    void start_loop(int port, I024Callback cb024, I025Callback cb025, I081Callback cb81, I083Callback cb83, I084Callback cb84) ;
     void end_loop() ;
     void set_multicast(const std::string& group, const std::string& iface_ip);
+
+    // Forward decoded messages to an OrderBookManager (wrapped handle_ mode).
+    // The manager is fed BEFORE the raw on_ callbacks fire, and additionally
+    // receives every checksum-valid header (needed for I001/I002/CHANNEL-SEQ
+    // gap tracking). Call before start_loop; pass nullptr to detach. The
+    // manager must outlive the parser's receive loop.
+    void set_order_book_manager(OrderBookManager* mgr);
 
 private:
     void receive_loop(int port) ;
@@ -140,6 +169,7 @@ private:
     // Parsing logic separated to handle the CALCULATED-FLAG offset
     bool parse_header(const uint8_t* data, Header& header);
     bool handle_i024(const uint8_t* data, const Header& header);
+    bool handle_i025(const uint8_t* data, size_t length, const Header& header);
     bool handle_i081(const uint8_t* data, const Header& header);
     bool handle_i083(const uint8_t* data, const Header& header);
     bool handle_i084(const uint8_t* data, const Header& header);
@@ -152,9 +182,11 @@ private:
     std::thread recv_thread;
     std::atomic<bool> running;
     I024Callback on_i024;
+    I025Callback on_i025;
     I081Callback on_i081;
     I083Callback on_i083;
     I084Callback on_i084;
+    OrderBookManager* book_mgr_ = nullptr;
 
     int sockfd = -1;
     bool use_multicast = false;

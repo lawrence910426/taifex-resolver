@@ -5,6 +5,7 @@
 #include <string>
 #include <chrono>
 #include <iomanip>
+#include <mutex>
 #include <sstream>
 #include <iostream>
 #include <sys/stat.h>   // for mkdir
@@ -40,8 +41,11 @@ public:
     }
 
     void log(const std::string& message, bool error = false) {
+        // Serializes writers: callers may log from multiple receive threads
+        // (e.g. a realtime parser and a snapshot parser).
+        std::lock_guard<std::mutex> lock(mtx_);
         if (!log_file.is_open()) return;
-        
+
         auto now = std::chrono::system_clock::now();
         auto now_time_t = std::chrono::system_clock::to_time_t(now);
         auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -71,6 +75,7 @@ public:
 private:
     Logger() = default;
     std::ofstream log_file;
+    std::mutex mtx_;
     std::string filtered_stock;  // Stock code to filter
 };
 

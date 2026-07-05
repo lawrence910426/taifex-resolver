@@ -1,3 +1,4 @@
+import argparse
 import socket
 import time
 
@@ -200,23 +201,96 @@ def create_packet_format_I083_TAIFEX():
     
     return esc_code + content_to_check + checksum + terminal_code
 
-def _build_i084(channel_seq, body):
-    """Wrap an I084 body (MESSAGE-TYPE byte + type-specific fields) with the
-    18-byte common header (MESSAGE-KIND 'C'), checksum and terminal code."""
+def _build_packet(transmission_code, message_kind, channel_seq, body,
+                  channel_id=1, info_time=b'\x13\x15\x40\x00\x00\x00'):
+    """Wrap a message body with the 18-byte common header, XOR checksum and
+    terminal code. `transmission_code`/`message_kind` are single-char strs."""
     esc_code = bytes([0x1B])
     header = (
-        b'\x34' +                      # 1.1 TRANSMISSION-CODE: '4' (snapshot group; cosmetic)
-        b'\x43' +                      # 1.2 MESSAGE-KIND: 'C' (I084 Snapshot Refresh)
-        b'\x13\x15\x40\x00\x00\x00' +  # 1.3 INFORMATION-TIME: 13:15:40.000000 (BCD)
-        _bcd(1, 2) +                   # 1.4 CHANNEL-ID: 1 (BCD)
-        _bcd(channel_seq, 5) +         # 1.5 CHANNEL-SEQ (BCD)
-        _bcd(1, 1) +                   # 1.6 VERSION-NO: 1 (BCD)
-        _bcd(len(body), 2)            # 1.7 BODY-LENGTH (BCD)
+        transmission_code.encode('ascii') +  # 1.1 TRANSMISSION-CODE
+        message_kind.encode('ascii') +       # 1.2 MESSAGE-KIND
+        info_time +                          # 1.3 INFORMATION-TIME (BCD 6B)
+        _bcd(channel_id, 2) +                # 1.4 CHANNEL-ID (BCD)
+        _bcd(channel_seq, 5) +               # 1.5 CHANNEL-SEQ (BCD)
+        _bcd(1, 1) +                         # 1.6 VERSION-NO: 1 (BCD)
+        _bcd(len(body), 2)                   # 1.7 BODY-LENGTH (BCD)
     )
     content = header + body
     checksum = bytes([calculate_checksum(content)])  # 3.1 CHECK-SUM: X(1)
     terminal_code = b'\x0D\x0A'                       # 4.1 TERMINAL-CODE: HEX 0D0A
     return esc_code + content + checksum + terminal_code
+
+def _prod(prod_id):
+    return prod_id.ljust(20).encode('ascii')
+
+def _md_entry(entry_type, price, qty, level, sign='0'):
+    """I083/I084-'O' style MD entry (no update_action byte)."""
+    return (entry_type.encode('ascii') + sign.encode('ascii') +
+            _bcd(price, 5) + _bcd(qty, 4) + _bcd(level, 1))
+
+def _md_entry_i081(action, entry_type, price, qty, level, sign='0'):
+    """I081 MD entry (leading MD-UPDATE-ACTION byte)."""
+    return action.encode('ascii') + _md_entry(entry_type, price, qty, level, sign)
+
+def build_i024(prod_id, prod_msg_seq, channel_seq, price=12000500, qty=1):
+    body = (
+        _prod(prod_id) + _bcd(prod_msg_seq, 5) +
+        b'\x30' +                            # CALCULATED-FLAG '0'
+        b'\x13\x15\x40\x00\x00\x00' +        # MATCH-TIME (BCD)
+        b'\x30' + _bcd(price, 5) +           # FIRST-MATCH sign + price
+        _bcd(qty, 4) +                       # FIRST-MATCH-QTY
+        b'\x80' +                            # DISPLAY-ITEM: first packet, 0 repeats
+        _bcd(qty, 4) + _bcd(1, 4) + _bcd(1, 4)  # totals: qty / buy cnt / sell cnt
+    )
+    return _build_packet('2', 'D', channel_seq, body)
+
+def build_i025(prod_id, prod_msg_seq, channel_seq,
+               day_high=12001000, day_low=11999000):
+    body = (
+        _prod(prod_id) + _bcd(prod_msg_seq, 5) +
+        b'\x30' + _bcd(day_high, 5) +        # DAY-HIGH sign + price
+        b'\x30' + _bcd(day_low, 5) +         # DAY-LOW sign + price
+        b'\x13\x15\x40\x00\x00\x00'          # SHOW-TIME (BCD)
+    )
+    return _build_packet('2', 'E', channel_seq, body)
+
+def build_i081(prod_id, prod_msg_seq, entries, channel_seq):
+    """entries: list of (action, entry_type, price, qty, level) tuples."""
+    body = _prod(prod_id) + _bcd(prod_msg_seq, 5) + _bcd(len(entries), 1)
+    for action, entry_type, price, qty, level in entries:
+        body += _md_entry_i081(action, entry_type, price, qty, level)
+    return _build_packet('2', 'A', channel_seq, body)
+
+def build_i083(prod_id, prod_msg_seq, entries, channel_seq, calc_flag='0'):
+    """entries: list of (entry_type, price, qty, level) tuples."""
+    body = (_prod(prod_id) + _bcd(prod_msg_seq, 5) +
+            calc_flag.encode('ascii') + _bcd(len(entries), 1))
+    for entry_type, price, qty, level in entries:
+        body += _md_entry(entry_type, price, qty, level)
+    return _build_packet('2', 'B', channel_seq, body)
+
+def build_i084_o(products, channel_seq):
+    """products: list of (prod_id, last_prod_msg_seq, entries) with entries as
+    (entry_type, price, qty, level) tuples."""
+    body = b'\x4F' + _bcd(len(products), 1)   # 'O', NO-ENTRIES
+    for prod_id, last_prod_msg_seq, entries in products:
+        body += _prod(prod_id) + _bcd(last_prod_msg_seq, 5) + _bcd(len(entries), 1)
+        for entry_type, price, qty, level in entries:
+            body += _md_entry(entry_type, price, qty, level)
+    return _build_packet('4', 'C', channel_seq, body, channel_id=13)
+
+def build_i084_a(last_seq):
+    # Per spec the Refresh Begin CHANNEL-SEQ is fixed at 1.
+    return _build_packet('4', 'C', 1, b'\x41' + _bcd(last_seq, 5), channel_id=13)
+
+def build_i084_z(last_seq, channel_seq):
+    return _build_packet('4', 'C', channel_seq, b'\x5A' + _bcd(last_seq, 5),
+                         channel_id=13)
+
+def _build_i084(channel_seq, body):
+    """Wrap an I084 body (MESSAGE-TYPE byte + type-specific fields) with the
+    18-byte common header (MESSAGE-KIND 'C'), checksum and terminal code."""
+    return _build_packet('4', 'C', channel_seq, body)
 
 def create_packet_format_I084_A_TAIFEX():
     # MESSAGE-TYPE 'A' (Refresh Begin): LAST-SEQ 9(10) PACK BCD 5B.
@@ -253,11 +327,7 @@ def send_udp_packet(packet, ip, port):
     finally:
         sock.close()
 
-if __name__ == "__main__":
-    target_ip = "127.0.0.1"
-    realtime_port = 14000   # Ch1/Ch2 即時行情 — I024/I081/I083
-    snapshot_port = 14700   # Ch13/Ch14 行情快照更新 — I084
-
+def run_roundrobin(target_ip, realtime_port, snapshot_port):
     # (packet, dst_port): realtime kinds go to the realtime port, the I084
     # snapshot-refresh kinds (A/O/Z) go to the snapshot port — mirroring the
     # per-channel capture/processing split.
@@ -277,3 +347,107 @@ if __name__ == "__main__":
         send_udp_packet(packet, target_ip, port)
         packet_index = (packet_index + 1) % len(packets)  # Round-robin
         time.sleep(1)
+
+def run_gap(target_ip, realtime_port, snapshot_port, prod="TXFG6"):
+    """Order-book maintenance scenario: builds a book from an I083 snapshot,
+    keeps it FRESH through I081/I024/I025 interleaving, simulates packet loss
+    (skipped PROD-MSG-SEQ + CHANNEL-SEQ -> STALE), recovers via an I084 'O'
+    snapshot, breaks the chain again, and recovers via I083. Loops forever
+    with strictly increasing sequences."""
+    prod_seq = 99    # last consumed PROD-MSG-SEQ
+    chan_seq = 0     # last consumed realtime CHANNEL-SEQ
+
+    def nxt():
+        nonlocal prod_seq, chan_seq
+        prod_seq += 1
+        chan_seq += 1
+        return prod_seq, chan_seq
+
+    def skip(note):
+        nonlocal prod_seq, chan_seq
+        prod_seq += 1
+        chan_seq += 1
+        print(f"--- simulating loss of prod_seq={prod_seq} "
+              f"(chan_seq={chan_seq}): {note}", flush=True)
+
+    while True:
+        steps = []
+
+        p, c = nxt()  # I083 base snapshot -> FRESH
+        steps.append(("I083 snapshot (expect FRESH)", realtime_port,
+                      build_i083(prod, p, [('0', 12000500, 10, 1),
+                                           ('1', 12000600, 8, 1)], c)))
+        p, c = nxt()  # contiguous increment
+        steps.append(("I081 new bid L2 (expect FRESH)", realtime_port,
+                      build_i081(prod, p, [('0', '0', 12000400, 5, 2)], c)))
+        p, c = nxt()  # trade consumes a prod seq: must NOT stale the book
+        steps.append(("I024 trade (seq interleave, no stale)", realtime_port,
+                      build_i024(prod, p, c)))
+        p, c = nxt()  # day-high/low consumes a prod seq too
+        steps.append(("I025 high/low (seq interleave, no stale)", realtime_port,
+                      build_i025(prod, p, c)))
+        p, c = nxt()
+        steps.append(("I081 change ask qty (expect FRESH)", realtime_port,
+                      build_i081(prod, p, [('1', '1', 12000600, 6, 1)], c)))
+
+        for note, port, pkt in steps:
+            print(f"Sending {note} -> {target_ip}:{port}", flush=True)
+            send_udp_packet(pkt, target_ip, port)
+            time.sleep(1)
+
+        skip("book must turn STALE")
+        p, c = nxt()
+        pkt = build_i081(prod, p, [('1', '0', 12000500, 9, 1)], c)
+        print(f"Sending I081 after loss (expect STALE) -> {target_ip}:{realtime_port}", flush=True)
+        send_udp_packet(pkt, target_ip, realtime_port)
+        time.sleep(1)
+
+        p, c = nxt()
+        pkt = build_i081(prod, p, [('1', '0', 12000500, 8, 1)], c)
+        print(f"Sending I081 best-effort (still STALE) -> {target_ip}:{realtime_port}", flush=True)
+        send_udp_packet(pkt, target_ip, realtime_port)
+        time.sleep(1)
+
+        # I084 carousel: A / O / Z. The 'O' carries the product's current
+        # LAST-PROD-MSG-SEQ -> adoption clears the stale flag.
+        print(f"Sending I084 A/O/Z (O expect FRESH recovery) -> {target_ip}:{snapshot_port}", flush=True)
+        send_udp_packet(build_i084_a(chan_seq), target_ip, snapshot_port)
+        send_udp_packet(build_i084_o([(prod, prod_seq,
+                                       [('0', 12000500, 8, 1),
+                                        ('1', 12000600, 6, 1)])], 2),
+                        target_ip, snapshot_port)
+        send_udp_packet(build_i084_z(chan_seq, 3), target_ip, snapshot_port)
+        time.sleep(1)
+
+        p, c = nxt()
+        pkt = build_i081(prod, p, [('0', '1', 12000700, 3, 2)], c)
+        print(f"Sending I081 post-recovery (expect FRESH) -> {target_ip}:{realtime_port}", flush=True)
+        send_udp_packet(pkt, target_ip, realtime_port)
+        time.sleep(1)
+
+        skip("second loss, STALE until the I083 below")
+        p, c = nxt()
+        pkt = build_i081(prod, p, [('1', '1', 12000600, 5, 1)], c)
+        print(f"Sending I081 after loss (expect STALE) -> {target_ip}:{realtime_port}", flush=True)
+        send_udp_packet(pkt, target_ip, realtime_port)
+        time.sleep(1)
+        # Next loop iteration opens with an I083 -> recovery via snapshot.
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description="TAIFEX packet mocker")
+    ap.add_argument("--scenario", choices=["roundrobin", "gap"],
+                    default="roundrobin",
+                    help="roundrobin: legacy fixed packets; gap: order-book "
+                         "staleness/recovery walkthrough")
+    ap.add_argument("--ip", default="127.0.0.1")
+    ap.add_argument("--realtime-port", type=int, default=14000)  # 即時行情 I024/I025/I081/I083
+    ap.add_argument("--snapshot-port", type=int, default=14700)  # 快照更新 I084
+    ap.add_argument("--prod", default="TXFG6",
+                    help="PROD-ID short code for the gap scenario "
+                         "(symbol + month letter A-L + year digit)")
+    args = ap.parse_args()
+
+    if args.scenario == "gap":
+        run_gap(args.ip, args.realtime_port, args.snapshot_port, args.prod)
+    else:
+        run_roundrobin(args.ip, args.realtime_port, args.snapshot_port)

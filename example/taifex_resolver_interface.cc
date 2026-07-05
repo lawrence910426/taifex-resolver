@@ -6,6 +6,7 @@
 #include <vector>
 #include <sstream>
 #include "parser.h"
+#include "order_book.h"
 #include "logger.h"
 
 // Atomic flag to control the main loop and handle graceful shutdown
@@ -92,6 +93,20 @@ void on_trade_match(const I024_Packet& pkt) {
     as << "========================";
 
     Logger::getInstance().log(as.str());
+}
+
+void on_day_high_low(const I025_Packet& pkt) {
+    std::stringstream ss;
+    ss << "Received Packet (I025 - Day High/Low):\n"
+       << "----------------------------------------\n"
+       << "Information Time   : " << pkt.header.info_time << "\n"
+       << "Channel Seq        : " << pkt.header.channel_seq << "\n"
+       << "Prod ID            : " << pkt.prod_id << "\n"
+       << "Prod Msg Seq       : " << pkt.prod_msg_seq << "\n"
+       << "Day High           : " << get_formatted_price(pkt.day_high_price_sign, pkt.day_high_price, pkt.decimal_locator) << "\n"
+       << "Day Low            : " << get_formatted_price(pkt.day_low_price_sign, pkt.day_low_price, pkt.decimal_locator) << "\n"
+       << "Show Time          : " << pkt.show_time << "\n";
+    Logger::getInstance().log(ss.str());
 }
 
 void on_incremental(const I081_Packet& pkt) {
@@ -240,6 +255,42 @@ void on_refresh(const I084_Packet& pkt) {
     }
 }
 
+/**
+ * Wrapped handle_ mode: fired by the OrderBookManager whenever a maintained
+ * book changes (including stale-flag flips). The reference is a snapshot that
+ * is self-consistent but TRANSIENT — valid only for the duration of this
+ * call. Copy the OrderBook explicitly if you need to keep it. (This handler
+ * only reads it during the call, which is the intended pattern.)
+ */
+void handle_futopt_order_book(const OrderBook& book) {
+    std::stringstream ss;
+    ss << "=== Order Book [" << (book.is_stale ? "STALE" : "FRESH") << "] ===\n"
+       << "Prod ID            : " << book.prod_id << "\n"
+       << "Last Prod Msg Seq  : " << book.last_prod_msg_seq << "\n"
+       << "Has Snapshot Base  : " << (book.has_snapshot ? "Yes" : "No") << "\n"
+       << "Information Time   : " << book.info_time << "\n";
+
+    auto print_side = [&](const char* name,
+                          const std::array<OrderBookLevel, TAIFEX_BOOK_DEPTH>& side) {
+        for (int i = 0; i < TAIFEX_BOOK_DEPTH; ++i) {
+            if (!side[i].valid) continue;
+            ss << "  [" << name << "] Level " << (i + 1)
+               << " | Price: " << get_formatted_price(side[i].price_sign, side[i].price, book.decimal_locator)
+               << " | Qty: " << side[i].quantity << "\n";
+        }
+    };
+    print_side("BID", book.bids);
+    print_side("ASK", book.asks);
+    print_side("Implied BID", book.derived_bids);
+    print_side("Implied ASK", book.derived_asks);
+    ss << "==============================";
+    Logger::getInstance().log(ss.str());
+
+    // Also echo a compact line to stdout so book transitions are easy to see.
+    std::cout << "[BOOK][" << (book.is_stale ? "STALE" : "FRESH") << "] "
+              << book.prod_id << " seq=" << book.last_prod_msg_seq << std::endl;
+}
+
 int main(int argc, char* argv[]) {
     // Register signal for graceful exit
     std::signal(SIGINT, signal_handler);
@@ -247,8 +298,14 @@ int main(int argc, char* argv[]) {
     // Initialize the singleton Logger
     Logger::getInstance().init("taifex_parser.log");
 
-    TaifexParser parser;
-    int port = 14000; // Default TAIFEX UDP port
+    TaifexParser parser;           // realtime: I024/I025/I081/I083
+    TaifexParser snapshot_parser;  // I084 snapshot carousel (separate port)
+    OrderBookManager book_mgr;
+    int port = 14000;          // Default TAIFEX realtime UDP port
+    int snapshot_port = 14700; // Default TAIFEX snapshot (I084) UDP port
+    // PROD-ID short code: symbol + month letter (A=Jan..L=Dec) + year digit.
+    // TXFG6 = TXF July 2026; update as contracts roll (or pass -prod).
+    std::string prod = "TXFG6";
     std::string multicast_group;
     std::string interface_ip;
 
@@ -256,6 +313,10 @@ int main(int argc, char* argv[]) {
         std::string arg = argv[i];
         if (arg == "-port" && i + 1 < argc) {
             port = std::stoi(argv[++i]);
+        } else if (arg == "-snapshot-port" && i + 1 < argc) {
+            snapshot_port = std::stoi(argv[++i]);
+        } else if (arg == "-prod" && i + 1 < argc) {
+            prod = argv[++i];
         } else if (arg == "-multicast" && i + 1 < argc) {
             multicast_group = argv[++i];
         } else if (arg == "-iface" && i + 1 < argc) {
@@ -267,15 +328,35 @@ int main(int argc, char* argv[]) {
         parser.set_multicast(multicast_group, interface_ip);
     }
 
+    // Wrapped handle_ mode: both parsers feed one shared manager, which
+    // fires handle_futopt_order_book whenever this instrument's book changes.
+    book_mgr.register_callback(prod, handle_futopt_order_book);
+    // A wildcard registration (every instrument) is available too:
+    //   book_mgr.register_callback_all(handle_futopt_order_book);
+    parser.set_order_book_manager(&book_mgr);
+    snapshot_parser.set_order_book_manager(&book_mgr);
+
+    // Native on_ mode keeps working alongside (raw packet callbacks).
     parser.start_loop(
         port,
-        on_trade_match,  // I024 Callback
-        on_incremental,  // I081 Callback
-        on_snapshot,     // I083 Callback
-        on_refresh       // I084 Callback
+        on_trade_match,   // I024 Callback
+        on_day_high_low,  // I025 Callback
+        on_incremental,   // I081 Callback
+        on_snapshot,      // I083 Callback
+        nullptr           // I084 never arrives on the realtime port
+    );
+    snapshot_parser.start_loop(
+        snapshot_port,
+        nullptr,          // realtime kinds never arrive on the snapshot port...
+        nullptr,
+        nullptr,
+        nullptr,
+        on_refresh        // ...but I084 logging is kept for visibility
     );
 
-    std::cout << "TAIFEX Parser Service started on port " << port << std::endl;
+    std::cout << "TAIFEX Parser Service started on port " << port
+              << " (snapshot port " << snapshot_port
+              << ", book for " << prod << ")" << std::endl;
     if (!multicast_group.empty() && !interface_ip.empty()) {
         std::cout << "Multicast: group=" << multicast_group
                   << " iface=" << interface_ip << std::endl;
@@ -290,6 +371,7 @@ int main(int argc, char* argv[]) {
     // Cleanup and join threads
     std::cout << "\nShutting down parser..." << std::endl;
     parser.end_loop();
+    snapshot_parser.end_loop();
 
     return 0;
 }
