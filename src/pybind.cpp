@@ -42,20 +42,12 @@ static void bind_header(py::module_ &m) {
         .def_readwrite("body_len", &Header::body_len);
 }
 
-static void bind_footer(py::module_ &m) {
-    py::class_<Footer>(m, "Footer")
-        .def(py::init<>())
-        .def_readwrite("checksum", &Footer::checksum)
-        .def_readwrite("terminal_code", &Footer::terminal_code);
-}
-
 static void bind_match_data(py::module_ &m) {
     py::class_<MatchData>(m, "MatchData")
         .def(py::init<>())
         .def_readwrite("price_sign", &MatchData::price_sign)
         .def_readwrite("price", &MatchData::price)
-        .def_readwrite("quantity", &MatchData::quantity)
-        .def_readwrite("decimal_locator", &MatchData::decimal_locator);
+        .def_readwrite("quantity", &MatchData::quantity);
 }
 
 static void bind_md_entry(py::module_ &m) {
@@ -66,8 +58,17 @@ static void bind_md_entry(py::module_ &m) {
         .def_readwrite("price_sign", &MDEntry::price_sign)
         .def_readwrite("price", &MDEntry::price)
         .def_readwrite("quantity", &MDEntry::quantity)
-        .def_readwrite("price_level", &MDEntry::price_level)
-        .def_readwrite("decimal_locator", &MDEntry::decimal_locator);
+        .def_readwrite("price_level", &MDEntry::price_level);
+}
+
+static void bind_snapshot_entry(py::module_ &m) {
+    py::class_<SnapshotEntry>(m, "SnapshotEntry")
+        .def(py::init<>())
+        .def_readwrite("entry_type", &SnapshotEntry::entry_type)
+        .def_readwrite("price_sign", &SnapshotEntry::price_sign)
+        .def_readwrite("price", &SnapshotEntry::price)
+        .def_readwrite("quantity", &SnapshotEntry::quantity)
+        .def_readwrite("price_level", &SnapshotEntry::price_level);
 }
 
 static void bind_i024(py::module_ &m) {
@@ -85,13 +86,11 @@ static void bind_i024(py::module_ &m) {
         .def_readwrite("first_price_sign", &I024_Packet::first_price_sign)
         .def_readwrite("first_price", &I024_Packet::first_price)
         .def_readwrite("first_quantity", &I024_Packet::first_quantity)
-        .def_readwrite("first_price_decimal", &I024_Packet::first_price_decimal)
         .def_readwrite("display_item", &I024_Packet::display_item)
         .def_readwrite("consecutive_matches", &I024_Packet::consecutive_matches)
         .def_readwrite("total_qty", &I024_Packet::total_qty)
         .def_readwrite("buy_cnt", &I024_Packet::buy_cnt)
-        .def_readwrite("sell_cnt", &I024_Packet::sell_cnt)
-        .def_readwrite("footer", &I024_Packet::footer);
+        .def_readwrite("sell_cnt", &I024_Packet::sell_cnt);
 }
 
 static void bind_i025(py::module_ &m) {
@@ -108,9 +107,7 @@ static void bind_i025(py::module_ &m) {
         .def_readwrite("day_low_price", &I025_Packet::day_low_price)
         .def_property("show_time",
                       fixed_char_getter<16>(&I025_Packet::show_time),
-                      fixed_char_setter<16>(&I025_Packet::show_time))
-        .def_readwrite("decimal_locator", &I025_Packet::decimal_locator)
-        .def_readwrite("footer", &I025_Packet::footer);
+                      fixed_char_setter<16>(&I025_Packet::show_time));
 }
 
 static void bind_i081(py::module_ &m) {
@@ -122,8 +119,7 @@ static void bind_i081(py::module_ &m) {
                       fixed_char_setter<21>(&I081_Packet::prod_id))
         .def_readwrite("prod_msg_seq", &I081_Packet::prod_msg_seq)
         .def_readwrite("no_md_entries", &I081_Packet::no_md_entries)
-        .def_readwrite("entries", &I081_Packet::entries)
-        .def_readwrite("footer", &I081_Packet::footer);
+        .def_readwrite("entries", &I081_Packet::entries);
 }
 
 static void bind_i083(py::module_ &m) {
@@ -136,8 +132,7 @@ static void bind_i083(py::module_ &m) {
         .def_readwrite("prod_msg_seq", &I083_Packet::prod_msg_seq)
         .def_readwrite("calculated_flag", &I083_Packet::calculated_flag)
         .def_readwrite("no_md_entries", &I083_Packet::no_md_entries)
-        .def_readwrite("entries", &I083_Packet::entries)
-        .def_readwrite("footer", &I083_Packet::footer);
+        .def_readwrite("entries", &I083_Packet::entries);
 }
 
 static void bind_i084_product(py::module_ &m) {
@@ -158,8 +153,7 @@ static void bind_i084(py::module_ &m) {
         .def_readwrite("message_type", &I084_Packet::message_type)
         .def_readwrite("last_seq", &I084_Packet::last_seq)
         .def_readwrite("no_entries", &I084_Packet::no_entries)
-        .def_readwrite("products", &I084_Packet::products)
-        .def_readwrite("footer", &I084_Packet::footer);
+        .def_readwrite("products", &I084_Packet::products);
 }
 
 static void bind_order_book_level(py::module_ &m) {
@@ -183,7 +177,6 @@ static void bind_order_book(py::module_ &m) {
         .def_property("info_time",
                       fixed_char_getter<16>(&OrderBook::info_time),
                       fixed_char_setter<16>(&OrderBook::info_time))
-        .def_readwrite("decimal_locator", &OrderBook::decimal_locator)
         // std::array<OrderBookLevel, 5> converts to a Python list copy.
         .def_readwrite("bids", &OrderBook::bids)
         .def_readwrite("asks", &OrderBook::asks)
@@ -237,9 +230,9 @@ PYBIND11_MODULE(taifex_udp_resolver, m) {
     m.doc() = "TAIFEX UDP Resolver (Python interface)";
 
     bind_header(m);
-    bind_footer(m);
     bind_match_data(m);
     bind_md_entry(m);
+    bind_snapshot_entry(m);
     bind_i024(m);
     bind_i025(m);
     bind_i081(m);

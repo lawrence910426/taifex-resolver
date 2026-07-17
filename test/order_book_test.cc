@@ -64,7 +64,18 @@ static MDEntry make_entry(char action, char type, uint64_t price, uint32_t qty,
     e.price = price;
     e.quantity = qty;
     e.price_level = level;
-    e.decimal_locator = 3;
+    return e;
+}
+
+// Snapshot entries (I083 / I084-'O') carry no MD-UPDATE-ACTION.
+static SnapshotEntry make_snapshot_entry(char type, uint64_t price, uint32_t qty,
+                                         uint8_t level, char sign = '0') {
+    SnapshotEntry e{};
+    e.entry_type = type;
+    e.price_sign = sign;
+    e.price = price;
+    e.quantity = qty;
+    e.price_level = level;
     return e;
 }
 
@@ -79,7 +90,7 @@ static I081_Packet make_i081(uint32_t seq, std::vector<MDEntry> entries,
     return p;
 }
 
-static I083_Packet make_i083(uint32_t seq, std::vector<MDEntry> entries,
+static I083_Packet make_i083(uint32_t seq, std::vector<SnapshotEntry> entries,
                              uint32_t channel_seq, char calc = '0',
                              const char* prod = kProd) {
     I083_Packet p{};
@@ -89,14 +100,13 @@ static I083_Packet make_i083(uint32_t seq, std::vector<MDEntry> entries,
     p.calculated_flag = calc;
     p.no_md_entries = (uint8_t)entries.size();
     p.entries = std::move(entries);
-    for (auto& e : p.entries) e.update_action = ' ';
     return p;
 }
 
 struct SnapProduct {
     const char* prod;
     uint32_t last_prod_msg_seq;
-    std::vector<MDEntry> entries;
+    std::vector<SnapshotEntry> entries;
 };
 
 static I084_Packet make_i084_o_multi(std::vector<SnapProduct> products,
@@ -117,7 +127,7 @@ static I084_Packet make_i084_o_multi(std::vector<SnapProduct> products,
 }
 
 static I084_Packet make_i084_o(uint32_t last_prod_msg_seq,
-                               std::vector<MDEntry> entries,
+                               std::vector<SnapshotEntry> entries,
                                uint32_t channel_seq, const char* prod = kProd) {
     return make_i084_o_multi({{prod, last_prod_msg_seq, std::move(entries)}},
                              channel_seq);
@@ -169,13 +179,13 @@ static bool level_is(const OrderBookLevel& l, uint64_t price, uint32_t qty) {
 static bool level_empty(const OrderBookLevel& l) { return !l.valid; }
 
 // The manual's example baseline book (pp. 89-90): 4 bids / 5 asks.
-static std::vector<MDEntry> manual_snapshot_entries() {
+static std::vector<SnapshotEntry> manual_snapshot_entries() {
     return {
-        make_entry(' ', '0', 10315, 4, 1), make_entry(' ', '0', 10314, 3, 2),
-        make_entry(' ', '0', 10313, 5, 3), make_entry(' ', '0', 10312, 8, 4),
-        make_entry(' ', '1', 10317, 6, 1), make_entry(' ', '1', 10318, 7, 2),
-        make_entry(' ', '1', 10319, 13, 3), make_entry(' ', '1', 10320, 15, 4),
-        make_entry(' ', '1', 10321, 13, 5),
+        make_snapshot_entry('0', 10315, 4, 1), make_snapshot_entry('0', 10314, 3, 2),
+        make_snapshot_entry('0', 10313, 5, 3), make_snapshot_entry('0', 10312, 8, 4),
+        make_snapshot_entry('1', 10317, 6, 1), make_snapshot_entry('1', 10318, 7, 2),
+        make_snapshot_entry('1', 10319, 13, 3), make_snapshot_entry('1', 10320, 15, 4),
+        make_snapshot_entry('1', 10321, 13, 5),
     };
 }
 
@@ -367,8 +377,8 @@ static void test_i084_recovery_then_fresh() {
     feed(mgr, make_i081(102, {make_entry('1', '1', 10319, 8, 3)}, 3));  // gap
     CHECK(rec.last().is_stale);
 
-    feed(mgr, make_i084_o(105, {make_entry(' ', '0', 10315, 2, 1),
-                                make_entry(' ', '1', 10317, 3, 1)},
+    feed(mgr, make_i084_o(105, {make_snapshot_entry('0', 10315, 2, 1),
+                                make_snapshot_entry('1', 10317, 3, 1)},
                           1));
     const OrderBook& b = rec.last();
     CHECK(!b.is_stale);
@@ -393,12 +403,12 @@ static void test_i084_multi_product() {
     mgr.register_callback("BBB", recB.cb());
     mgr.register_callback("CCC", recC.cb());
     // BBB already live and ahead of the snapshot: its block must be ignored.
-    feed(mgr, make_i083(50, {make_entry(' ', '0', 200, 2, 1)}, 1, '0', "BBB"));
+    feed(mgr, make_i083(50, {make_snapshot_entry('0', 200, 2, 1)}, 1, '0', "BBB"));
 
     feed(mgr, make_i084_o_multi(
-                  {{"AAA", 10, {make_entry(' ', '0', 100, 1, 1)}},
-                   {"BBB", 40, {make_entry(' ', '0', 999, 9, 1)}},
-                   {"CCC", 30, {make_entry(' ', '1', 300, 3, 1)}}},
+                  {{"AAA", 10, {make_snapshot_entry('0', 100, 1, 1)}},
+                   {"BBB", 40, {make_snapshot_entry('0', 999, 9, 1)}},
+                   {"CCC", 30, {make_snapshot_entry('1', 300, 3, 1)}}},
                   1));
 
     CHECK(recA.books.size() == 1);
@@ -441,9 +451,9 @@ static void test_malformed_entries_ignored() {
 
     // Same garbage inside a snapshot: adoption skips it, keeps the rest.
     feed(mgr, make_i083(102,
-                        {make_entry(' ', '0', 500, 5, 1),
-                         make_entry(' ', '1', 600, 6, 9),   // level > depth
-                         make_entry(' ', 'Z', 700, 7, 1)},  // unknown side
+                        {make_snapshot_entry('0', 500, 5, 1),
+                         make_snapshot_entry('1', 600, 6, 9),   // level > depth
+                         make_snapshot_entry('Z', 700, 7, 1)},  // unknown side
                         3));
     const OrderBook& b = rec.last();
     CHECK(level_is(b.bids[0], 500, 5));
@@ -457,7 +467,7 @@ static void test_i083_recovery_from_stale() {
     feed(mgr, make_i083(100, manual_snapshot_entries(), 1));
     feed(mgr, make_i081(102, {make_entry('1', '1', 10319, 8, 3)}, 3));  // gap
     CHECK(rec.last().is_stale);
-    feed(mgr, make_i083(110, {make_entry(' ', '0', 10300, 1, 1)}, 4));
+    feed(mgr, make_i083(110, {make_snapshot_entry('0', 10300, 1, 1)}, 4));
     CHECK(!rec.last().is_stale);
     CHECK(rec.last().last_prod_msg_seq == 110);
     CHECK(level_is(rec.last().bids[0], 10300, 1));
@@ -472,7 +482,7 @@ static void test_i083_equal_seq_adoption_while_stale() {
     feed(mgr, make_i083(100, manual_snapshot_entries(), 1));
     feed(mgr, make_i081(102, {make_entry('1', '1', 10319, 8, 3)}, 3));  // gap
     CHECK(rec.last().is_stale);
-    feed(mgr, make_i083(102, {make_entry(' ', '0', 10301, 2, 1)}, 4));
+    feed(mgr, make_i083(102, {make_snapshot_entry('0', 10301, 2, 1)}, 4));
     CHECK(!rec.last().is_stale);
     CHECK(rec.last().last_prod_msg_seq == 102);
     CHECK(level_is(rec.last().bids[0], 10301, 2));
@@ -482,7 +492,7 @@ static void test_noncontiguous_post_snapshot_stale_again() {
     OrderBookManager mgr;
     Recorder rec;
     mgr.register_callback(kProd, rec.cb());
-    feed(mgr, make_i084_o(105, {make_entry(' ', '0', 10315, 2, 1)}, 1));
+    feed(mgr, make_i084_o(105, {make_snapshot_entry('0', 10315, 2, 1)}, 1));
     CHECK(!rec.last().is_stale);
     // First post-snapshot increment skips 106 -> the adoption race hit us.
     feed(mgr, make_i081(107, {make_entry('1', '0', 10315, 1, 1)}, 10));
@@ -493,7 +503,7 @@ static void test_increment_at_or_below_snapshot_seq_dropped() {
     OrderBookManager mgr;
     Recorder rec;
     mgr.register_callback(kProd, rec.cb());
-    feed(mgr, make_i084_o(105, {make_entry(' ', '0', 10315, 2, 1)}, 1));
+    feed(mgr, make_i084_o(105, {make_snapshot_entry('0', 10315, 2, 1)}, 1));
     // Covered by the snapshot: must be dropped, book unchanged.
     feed(mgr, make_i081(104, {make_entry('0', '0', 10399, 9, 1)}, 10));
     feed(mgr, make_i081(105, {make_entry('0', '0', 10399, 9, 1)}, 11));
@@ -508,7 +518,7 @@ static void test_trial_i083_tracks_seq_but_keeps_book() {
     Recorder rec;
     mgr.register_callback(kProd, rec.cb());
     feed(mgr, make_i083(100, manual_snapshot_entries(), 1));
-    feed(mgr, make_i083(101, {make_entry(' ', '0', 999999999, 50, 1)}, 2, '1'));
+    feed(mgr, make_i083(101, {make_snapshot_entry('0', 999999999, 50, 1)}, 2, '1'));
 
     CHECK(rec.books.size() == 1);  // trial snapshot: no delivery
     auto b = mgr.get_book(kProd);
@@ -528,8 +538,8 @@ static void test_older_snapshot_ignored() {
     feed(mgr, make_i083(100, manual_snapshot_entries(), 1));
     feed(mgr, make_i081(101, {make_entry('1', '1', 10319, 9, 3)}, 2));
     // Stale carousel data from before the increment: ignore both kinds.
-    feed(mgr, make_i084_o(99, {make_entry(' ', '0', 1, 1, 1)}, 1));
-    feed(mgr, make_i083(100, {make_entry(' ', '0', 2, 2, 1)}, 3));
+    feed(mgr, make_i084_o(99, {make_snapshot_entry('0', 1, 1, 1)}, 1));
+    feed(mgr, make_i083(100, {make_snapshot_entry('0', 2, 2, 1)}, 3));
     CHECK(rec.books.size() == 2);
     auto b = mgr.get_book(kProd);
     CHECK(b && b->last_prod_msg_seq == 101);
@@ -579,8 +589,8 @@ static void test_channel_gap_suspect_then_contiguity_clears() {
     Recorder recA, recB;
     mgr.register_callback("AAA", recA.cb());
     mgr.register_callback("BBB", recB.cb());
-    feed(mgr, make_i083(10, {make_entry(' ', '0', 100, 1, 1)}, 1, '0', "AAA"));
-    feed(mgr, make_i083(20, {make_entry(' ', '0', 200, 2, 1)}, 2, '0', "BBB"));
+    feed(mgr, make_i083(10, {make_snapshot_entry('0', 100, 1, 1)}, 1, '0', "AAA"));
+    feed(mgr, make_i083(20, {make_snapshot_entry('0', 200, 2, 1)}, 2, '0', "BBB"));
     CHECK(!recA.last().is_stale);
     CHECK(!recB.last().is_stale);
 
@@ -606,7 +616,7 @@ static void test_channel_gap_with_product_loss_needs_snapshot() {
     OrderBookManager mgr;
     Recorder rec;
     mgr.register_callback(kProd, rec.cb());
-    feed(mgr, make_i083(10, {make_entry(' ', '0', 100, 1, 1)}, 1));
+    feed(mgr, make_i083(10, {make_snapshot_entry('0', 100, 1, 1)}, 1));
     // Lost packet contained this product's seq 11:
     feed(mgr, make_i081(12, {make_entry('1', '0', 100, 5, 1)}, 3));
     CHECK(rec.last().is_stale);
@@ -614,7 +624,7 @@ static void test_channel_gap_with_product_loss_needs_snapshot() {
     feed(mgr, make_i081(13, {make_entry('1', '0', 100, 6, 1)}, 4));
     CHECK(rec.last().is_stale);
     // ...only a snapshot does.
-    feed(mgr, make_i084_o(13, {make_entry(' ', '0', 100, 6, 1)}, 1));
+    feed(mgr, make_i084_o(13, {make_snapshot_entry('0', 100, 6, 1)}, 1));
     CHECK(!rec.last().is_stale);
 }
 
@@ -622,7 +632,7 @@ static void test_heartbeat_reveals_gap_on_idle_channel() {
     OrderBookManager mgr;
     Recorder rec;
     mgr.register_callback(kProd, rec.cb());
-    feed(mgr, make_i083(10, {make_entry(' ', '0', 100, 1, 1)}, 7));
+    feed(mgr, make_i083(10, {make_snapshot_entry('0', 100, 1, 1)}, 7));
     CHECK(!rec.last().is_stale);
     // Heartbeat repeating the last seq: fine.
     mgr.on_header(make_header('1', 7));
@@ -637,11 +647,11 @@ static void test_snapshot_channel_gap_ignored() {
     OrderBookManager mgr;
     Recorder rec;
     mgr.register_callback(kProd, rec.cb());
-    feed(mgr, make_i083(10, {make_entry(' ', '0', 100, 1, 1)}, 1));
+    feed(mgr, make_i083(10, {make_snapshot_entry('0', 100, 1, 1)}, 1));
     // I084 carousel resets its CHANNEL-SEQ each cycle; jumps there are noise.
-    feed(mgr, make_i084_o(10, {make_entry(' ', '0', 100, 1, 1)}, 500));
-    feed(mgr, make_i084_o(10, {make_entry(' ', '0', 100, 1, 1)}, 1));
-    feed(mgr, make_i084_o(10, {make_entry(' ', '0', 100, 1, 1)}, 900));
+    feed(mgr, make_i084_o(10, {make_snapshot_entry('0', 100, 1, 1)}, 500));
+    feed(mgr, make_i084_o(10, {make_snapshot_entry('0', 100, 1, 1)}, 1));
+    feed(mgr, make_i084_o(10, {make_snapshot_entry('0', 100, 1, 1)}, 900));
     CHECK(!mgr.get_book(kProd)->is_stale);
 }
 
@@ -685,7 +695,7 @@ static void test_callback_routing() {
         addresses.push_back(&b);
     });
 
-    feed(mgr, make_i083(1, {make_entry(' ', '0', 100, 1, 1)}, 1, '0', "TXFG6"));
+    feed(mgr, make_i083(1, {make_snapshot_entry('0', 100, 1, 1)}, 1, '0', "TXFG6"));
     CHECK(recA.books.size() == 1);
     CHECK(recA2.books.size() == 1);  // both callbacks for the product fire
     CHECK(recB.books.empty());
@@ -693,7 +703,7 @@ static void test_callback_routing() {
     CHECK(addresses.size() == 2);
     CHECK(addresses[0] == addresses[1]);  // one shared snapshot per event
 
-    feed(mgr, make_i083(1, {make_entry(' ', '0', 200, 1, 1)}, 2, '0', "MXFG6"));
+    feed(mgr, make_i083(1, {make_snapshot_entry('0', 200, 1, 1)}, 2, '0', "MXFG6"));
     CHECK(recB.books.size() == 1);
     CHECK(recAll.books.size() == 2);
 
@@ -716,7 +726,7 @@ static void test_reentrant_callback() {
         CHECK(again.has_value());
         mgr.register_callback("OTHER", [](const OrderBook&) {});
     });
-    feed(mgr, make_i083(1, {make_entry(' ', '0', 100, 1, 1)}, 1));
+    feed(mgr, make_i083(1, {make_snapshot_entry('0', 100, 1, 1)}, 1));
     CHECK(calls == 1);
 }
 
@@ -735,7 +745,7 @@ static void test_two_thread_feed_smoke() {
     std::thread snap([&] {
         for (int i = 0; i < 500; ++i)
             feed(mgr, make_i084_o(1 + i * 10,
-                                  {make_entry(' ', '0', 10315, 1, 1)}, 1));
+                                  {make_snapshot_entry('0', 10315, 1, 1)}, 1));
     });
     rt.join();
     snap.join();
