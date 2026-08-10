@@ -78,6 +78,18 @@ void TaifexParser::receive_loop(int port) {
     int reuse = 1;
     setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
+    // Enlarge the receive queue so brief consumer stalls don't drop packets.
+    // SO_RCVBUFFORCE bypasses net.core.rmem_max but requires CAP_NET_ADMIN;
+    // fall back to SO_RCVBUF (clamped to rmem_max) when unavailable.
+    int rcvbuf = 64 * 1024 * 1024;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_RCVBUFFORCE, &rcvbuf, sizeof(rcvbuf)) < 0) {
+        setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    }
+    int actual_rcvbuf = 0;
+    socklen_t optlen = sizeof(actual_rcvbuf);
+    getsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &actual_rcvbuf, &optlen);
+    std::cerr << "[INFO] recv buffer: " << actual_rcvbuf << " bytes" << std::endl;
+
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
