@@ -337,6 +337,15 @@ void OrderBookManager::on_i084(const I084_Packet& pkt) {
             if (st.book.last_prod_msg_seq != 0 &&
                 prod.last_prod_msg_seq < st.book.last_prod_msg_seq)
                 continue;  // snapshot older than the live book: ignore
+            // No-op cycle: the carousel re-broadcasts every product on a
+            // fixed cadence, so an idle product re-appears with an unchanged
+            // serial every cycle. Equal serial on a trusted book means equal
+            // content (any book change consumes a PROD-MSG-SEQ), so there is
+            // nothing to adopt and nothing to tell subscribers. A book whose
+            // trust is broken or suspect still adopts: that changes state.
+            if (prod.last_prod_msg_seq == st.book.last_prod_msg_seq &&
+                st.book.has_snapshot && st.synced && !st.suspect)
+                continue;
             // Carousel: the header time is the BROADCAST instant, not the
             // content time — the 'O' block has no time field and its content
             // is as-of LAST-PROD-MSG-SEQ. info_time stays untouched.

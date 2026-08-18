@@ -490,6 +490,39 @@ static void test_i084_adoption_preserves_info_time() {
     CHECK(std::string(b->snapshot_time) == "11:31:00.000000");
 }
 
+// The carousel re-broadcasts every product on a fixed cycle, so an idle
+// product re-appears with an unchanged serial every ~10 s. Re-adopting it
+// changes nothing — no delivery must fire for it. A suspect or broken book
+// still adopts (that changes state), and a newer serial still adopts.
+static void test_i084_noop_carousel_delivery_suppressed() {
+    OrderBookManager mgr;
+    Recorder rec;
+    mgr.register_callback(kProd, rec.cb());
+
+    feed(mgr, make_i084_o(5, {make_snapshot_entry('0', 10315, 2, 1)}, 1));
+    CHECK(rec.books.size() == 1);
+
+    // Same serial, next cycle: suppressed.
+    feed(mgr, make_i084_o(5, {make_snapshot_entry('0', 10315, 2, 1)}, 2));
+    feed(mgr, make_i084_o(5, {make_snapshot_entry('0', 10315, 2, 1)}, 3));
+    CHECK(rec.books.size() == 1);
+
+    // Newer serial: adopts and delivers.
+    feed(mgr, make_i084_o(6, {make_snapshot_entry('0', 10316, 3, 1)}, 4));
+    CHECK(rec.books.size() == 2);
+    CHECK(level_is(rec.last().bids[0], 10316, 3));
+
+    // A realtime channel gap marks the book suspect (one stale delivery);
+    // the next equal-serial 'O' is then a real state change and delivers.
+    feed(mgr, make_i024(1, 10, "MXFG6"));  // establishes the realtime channel
+    mgr.on_header(make_header('1', 50));   // heartbeat reveals missed messages
+    CHECK(rec.books.size() == 3);
+    CHECK(rec.last().is_stale);
+    feed(mgr, make_i084_o(6, {make_snapshot_entry('0', 10316, 3, 1)}, 5));
+    CHECK(rec.books.size() == 4);
+    CHECK(!rec.last().is_stale);
+}
+
 // Corrupt/hostile MD entries (price_level 0 or >5, unknown entry_type or
 // update_action) must be skipped without touching the book or crashing.
 static void test_malformed_entries_ignored() {
@@ -1032,6 +1065,7 @@ int main() {
     RUN(test_i084_multi_product);
     RUN(test_i084_a_z_are_ignored_by_manager);
     RUN(test_i084_adoption_preserves_info_time);
+    RUN(test_i084_noop_carousel_delivery_suppressed);
     RUN(test_truncated_message_rejected);
     RUN(test_lying_entry_count_rejected);
     RUN(test_malformed_entries_ignored);
