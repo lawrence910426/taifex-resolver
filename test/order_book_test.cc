@@ -712,6 +712,42 @@ static void test_i002_reset_clears_everything() {
     CHECK(!rec.last().is_stale);
 }
 
+// An I084 'O' block built BEFORE a reset can still arrive after it: a
+// carousel round spans seconds and the socket buffer holds more. The reset
+// restarts every PROD-MSG-SEQ, so that stale block must not re-base the
+// cleared product at its pre-reset serial — that would silently drop the
+// whole restarted session while reporting fresh. It is quarantined until
+// the next Refresh Begin.
+static void test_reset_then_inflight_i084_is_quarantined() {
+    OrderBookManager mgr;
+    Recorder rec;
+    mgr.register_callback(kProd, rec.cb());
+    feed(mgr, make_i083(500000, manual_snapshot_entries(), 1));
+    CHECK(!rec.last().is_stale);
+
+    mgr.on_header(make_header('2', 0));  // I002: books and serials reset
+    CHECK(rec.last().is_stale);
+
+    // In-flight 'O' from the round that began before the reset: ignored.
+    feed(mgr, make_i084_o(499000, {make_snapshot_entry('0', 10315, 2, 1)}, 1));
+    CHECK(!mgr.get_book(kProd).has_value());
+
+    // The restarted realtime session must reach the subscriber (a serial
+    // starting at 1 into an empty book is a complete chain).
+    feed(mgr, make_i081(1, {make_entry('0', '0', 10400, 7, 1)}, 1));
+    CHECK(mgr.get_book(kProd)->last_prod_msg_seq == 1);
+    CHECK(level_is(mgr.get_book(kProd)->bids[0], 10400, 7));
+    CHECK(!rec.last().is_stale);
+
+    // Refresh Begin lifts the quarantine; the next 'O' round (assembled
+    // after the exchange's own reset) adopts normally.
+    feed(mgr, make_i084_az('A', 2, 1));
+    feed(mgr, make_i084_o(2, {make_snapshot_entry('0', 10401, 1, 1)}, 2));
+    CHECK(mgr.get_book(kProd)->last_prod_msg_seq == 2);
+    CHECK(level_is(mgr.get_book(kProd)->bids[0], 10401, 1));
+    CHECK(!rec.last().is_stale);
+}
+
 static void test_callback_routing() {
     OrderBookManager mgr;
     Recorder recA, recA2, recB, recAll;
@@ -819,6 +855,7 @@ int main() {
     RUN(test_heartbeat_reveals_gap_on_idle_channel);
     RUN(test_snapshot_channel_gap_ignored);
     RUN(test_i002_reset_clears_everything);
+    RUN(test_reset_then_inflight_i084_is_quarantined);
     RUN(test_callback_routing);
     RUN(test_reentrant_callback);
     RUN(test_two_thread_feed_smoke);

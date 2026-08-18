@@ -136,6 +136,10 @@ void OrderBookManager::collect_reset_locked(std::vector<Delivery>& out) {
     }
     products_.clear();
     channels_.clear();
+    // Quarantine the snapshot carousel until its next Refresh Begin: an 'O'
+    // block assembled before this reset must not re-base a cleared product
+    // at its pre-reset serial (see the field comment in order_book.h).
+    snapshot_quarantine_ = true;
 }
 
 void OrderBookManager::collect_delivery_locked(
@@ -299,11 +303,19 @@ void OrderBookManager::on_i083(const I083_Packet& pkt) {
 }
 
 void OrderBookManager::on_i084(const I084_Packet& pkt) {
-    if (pkt.message_type != 'O') return;  // 'A'/'Z'/'S'/'P' carry no book data
+    if (pkt.message_type == 'A') {
+        // Refresh Begin: this round was assembled after any reset we have
+        // processed, so it lifts the post-reset quarantine.
+        std::lock_guard<std::mutex> lock(mtx_);
+        snapshot_quarantine_ = false;
+        return;
+    }
+    if (pkt.message_type != 'O') return;  // 'Z'/'S'/'P' carry no book data
     for (const I084Product& prod : pkt.products) {
         std::vector<Delivery> deliveries;
         {
             std::lock_guard<std::mutex> lock(mtx_);
+            if (snapshot_quarantine_) return;  // pre-reset round in flight
             ProductState& st = get_or_create_locked(prod.prod_id);
             if (st.book.last_prod_msg_seq != 0 &&
                 prod.last_prod_msg_seq < st.book.last_prod_msg_seq)

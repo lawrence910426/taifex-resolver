@@ -159,6 +159,16 @@ private:
     static void fire(std::vector<Delivery>& deliveries);
 
     mutable std::mutex mtx_;
+    // Set by a reset (I002 or reset()): an I084 'O' block that was built
+    // BEFORE the reset can still be in flight (the carousel round spans
+    // seconds, the socket buffer holds more), and adopting it would re-base
+    // a freshly cleared product at the pre-reset serial — after which every
+    // post-reset message is dropped as a duplicate, forever, while the book
+    // reports fresh. Per the manual's recovery rule (discard snapshot data,
+    // wait for the next Refresh Begin), 'O' blocks are ignored while this is
+    // set; the next I084 'A' clears it, since everything after that Begin
+    // was assembled by the exchange after its own reset.
+    bool snapshot_quarantine_ = false;
     std::unordered_map<std::string, ProductState> products_;   // key: trimmed prod_id
     std::unordered_map<uint16_t, ChannelState> channels_;      // key: channel_id
     std::unordered_map<std::string, std::vector<CallbackPtr>> callbacks_;
