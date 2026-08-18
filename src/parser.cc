@@ -143,14 +143,36 @@ bool TaifexParser::setup_socket(int port) {
     getsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &actual_rcvbuf, &optlen);
     std::cerr << "[INFO] recv buffer: " << actual_rcvbuf << " bytes" << std::endl;
 
+    if (use_multicast) {
+        // Belt: turn OFF the "deliver every group the HOST joined" default.
+        // With IP_MULTICAST_ALL=1 (the kernel default), a socket receives
+        // any group on its port that ANY process on the host has joined —
+        // measured: a group-bound socket with a failed join still received
+        // the feed through a co-tenant's membership. With it off, this
+        // socket's own IP_ADD_MEMBERSHIP below is the only thing that
+        // admits traffic, which is what makes a failed join a real error.
+        int mc_all = 0;
+        if (setsockopt(sockfd, IPPROTO_IP, IP_MULTICAST_ALL, &mc_all, sizeof(mc_all)) < 0) {
+            std::cerr << "[WARN] IP_MULTICAST_ALL=0 failed: " << strerror(errno)
+                      << " — group isolation still enforced by the bind address"
+                      << std::endl;
+        }
+    }
+
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    // Bind to the GROUP, not INADDR_ANY: TAIFEX day and night sessions share
+    // every port and differ only by group (225.0.x day vs 225.10.x night),
+    // so a wildcard bind lets the other session's feed leak into this
+    // listener. Binding the group address makes the kernel demultiplex for
+    // us. Legal on Linux without privilege, and legal before the IGMP join.
+    addr.sin_addr.s_addr = use_multicast ? group_addr : htonl(INADDR_ANY);
 
     if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        std::cerr << "[ERROR] bind failed on port " << port << ": "
-                  << strerror(errno) << std::endl;
+        std::cerr << "[ERROR] bind failed on "
+                  << (use_multicast ? multicast_group : std::string("0.0.0.0"))
+                  << ":" << port << ": " << strerror(errno) << std::endl;
         close(sockfd);
         sockfd = -1;
         return false;
