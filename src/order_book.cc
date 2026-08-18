@@ -103,7 +103,8 @@ bool OrderBookManager::track_seq_locked(ProductState& st, uint32_t seq) {
 void OrderBookManager::adopt_snapshot_locked(ProductState& st, const char* prod_id,
                                              uint32_t seq,
                                              const std::vector<SnapshotEntry>& entries,
-                                             const char* info_time) {
+                                             const char* content_time,
+                                             const char* snapshot_time) {
     OrderBook& book = st.book;
     book.bids.fill(OrderBookLevel{});
     book.asks.fill(OrderBookLevel{});
@@ -118,7 +119,9 @@ void OrderBookManager::adopt_snapshot_locked(ProductState& st, const char* prod_
     }
     std::memcpy(book.prod_id, prod_id, 20);
     book.prod_id[20] = '\0';
-    std::memcpy(book.info_time, info_time, sizeof(book.info_time));
+    if (content_time)
+        std::memcpy(book.info_time, content_time, sizeof(book.info_time));
+    std::memcpy(book.snapshot_time, snapshot_time, sizeof(book.snapshot_time));
     book.last_prod_msg_seq = seq;
     book.has_snapshot = true;
     st.synced = true;
@@ -305,8 +308,10 @@ void OrderBookManager::on_i083(const I083_Packet& pkt) {
             if (st.book.last_prod_msg_seq != 0 &&
                 pkt.prod_msg_seq < st.book.last_prod_msg_seq)
                 return;  // older than the live book: ignore
+            // An I083 rides the realtime channel: its broadcast time IS the
+            // content time.
             adopt_snapshot_locked(st, pkt.prod_id, pkt.prod_msg_seq, pkt.entries,
-                                  pkt.header.info_time);
+                                  pkt.header.info_time, pkt.header.info_time);
             collect_delivery_locked(trim_prod_id(pkt.prod_id), st.book,
                                     /*is_stale=*/false, deliveries);
         }
@@ -332,8 +337,11 @@ void OrderBookManager::on_i084(const I084_Packet& pkt) {
             if (st.book.last_prod_msg_seq != 0 &&
                 prod.last_prod_msg_seq < st.book.last_prod_msg_seq)
                 continue;  // snapshot older than the live book: ignore
+            // Carousel: the header time is the BROADCAST instant, not the
+            // content time — the 'O' block has no time field and its content
+            // is as-of LAST-PROD-MSG-SEQ. info_time stays untouched.
             adopt_snapshot_locked(st, prod.prod_id, prod.last_prod_msg_seq,
-                                  prod.entries, pkt.header.info_time);
+                                  prod.entries, nullptr, pkt.header.info_time);
             collect_delivery_locked(trim_prod_id(prod.prod_id), st.book,
                                     /*is_stale=*/false, deliveries);
         }

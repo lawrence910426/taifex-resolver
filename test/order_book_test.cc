@@ -457,6 +457,39 @@ static void test_i084_a_z_are_ignored_by_manager() {
     CHECK(!mgr.get_book(kProd)->is_stale);
 }
 
+// An I084 'O' block carries no time of its own — its header time is the
+// carousel BROADCAST instant, while the content is as-of LAST-PROD-MSG-SEQ.
+// Adoption must stamp snapshot_time, never info_time; info_time keeps
+// meaning "when the content last changed".
+static void test_i084_adoption_preserves_info_time() {
+    OrderBookManager mgr;
+
+    I081_Packet inc = make_i081(1, {make_entry('0', '0', 10315, 4, 1)}, 1);
+    std::snprintf(inc.header.info_time, sizeof(inc.header.info_time),
+                  "09:00:00.000000");
+    feed(mgr, inc);
+    CHECK(std::string(mgr.get_book(kProd)->info_time) == "09:00:00.000000");
+    CHECK(std::string(mgr.get_book(kProd)->snapshot_time).empty());
+
+    // Idle product: the carousel re-broadcasts the same seq much later.
+    I084_Packet o = make_i084_o(1, {make_snapshot_entry('0', 10315, 4, 1)}, 1);
+    std::snprintf(o.header.info_time, sizeof(o.header.info_time),
+                  "11:30:00.000000");
+    feed(mgr, o);
+    auto b = mgr.get_book(kProd);
+    CHECK(std::string(b->info_time) == "09:00:00.000000");      // untouched
+    CHECK(std::string(b->snapshot_time) == "11:30:00.000000");  // broadcast
+
+    // An I083 rides the realtime channel: its time IS the content time.
+    I083_Packet snap = make_i083(2, {make_snapshot_entry('0', 10320, 1, 1)}, 2);
+    std::snprintf(snap.header.info_time, sizeof(snap.header.info_time),
+                  "11:31:00.000000");
+    feed(mgr, snap);
+    b = mgr.get_book(kProd);
+    CHECK(std::string(b->info_time) == "11:31:00.000000");
+    CHECK(std::string(b->snapshot_time) == "11:31:00.000000");
+}
+
 // Corrupt/hostile MD entries (price_level 0 or >5, unknown entry_type or
 // update_action) must be skipped without touching the book or crashing.
 static void test_malformed_entries_ignored() {
@@ -998,6 +1031,7 @@ int main() {
     RUN(test_i084_recovery_then_fresh);
     RUN(test_i084_multi_product);
     RUN(test_i084_a_z_are_ignored_by_manager);
+    RUN(test_i084_adoption_preserves_info_time);
     RUN(test_truncated_message_rejected);
     RUN(test_lying_entry_count_rejected);
     RUN(test_malformed_entries_ignored);

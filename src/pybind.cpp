@@ -178,6 +178,9 @@ static void bind_order_book(py::module_ &m) {
         .def_property("info_time",
                       fixed_char_getter<16>(&OrderBook::info_time),
                       fixed_char_setter<16>(&OrderBook::info_time))
+        .def_property("snapshot_time",
+                      fixed_char_getter<16>(&OrderBook::snapshot_time),
+                      fixed_char_setter<16>(&OrderBook::snapshot_time))
         // std::array<OrderBookLevel, 5> converts to a Python list copy.
         .def_readwrite("bids", &OrderBook::bids)
         .def_readwrite("asks", &OrderBook::asks)

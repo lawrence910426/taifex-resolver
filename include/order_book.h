@@ -34,7 +34,17 @@ struct OrderBook {
     uint32_t last_prod_msg_seq = 0;  // PROD-MSG-SEQ of last message applied/adopted
     bool is_stale = true;            // true = increment chain broken or unproven
     bool has_snapshot = false;       // ever adopted an I083 / I084-'O' base
-    char info_time[16] = {0};        // header INFORMATION-TIME of driving message
+    // When the CONTENT last changed: the header INFORMATION-TIME of the last
+    // realtime message (I081) or realtime snapshot (I083) applied. An I084
+    // carousel adoption does NOT touch it — the carousel re-broadcasts every
+    // book on a fixed cycle and its 'O' block carries no time of its own, so
+    // the broadcast instant says nothing about when the content changed
+    // (measured median gap: ~15 minutes). Empty until the first realtime
+    // message for the product.
+    char info_time[16] = {0};
+    // Broadcast INFORMATION-TIME of the snapshot message (I083 or I084 'O')
+    // that last re-based this book; empty if never re-based from a snapshot.
+    char snapshot_time[16] = {0};
     std::array<OrderBookLevel, TAIFEX_BOOK_DEPTH> bids{};
     std::array<OrderBookLevel, TAIFEX_BOOK_DEPTH> asks{};
     std::array<OrderBookLevel, TAIFEX_BOOK_DEPTH> derived_bids{};
@@ -146,9 +156,12 @@ private:
     // Advance per-product seq; returns true when the message is new
     // (seq > last). Handles duplicate drop and gap -> synced=false.
     bool track_seq_locked(ProductState& st, uint32_t seq);
+    // Replace the book content wholesale. content_time stamps info_time
+    // (pass nullptr to leave it — the I084 carousel case, whose broadcast
+    // time is not a content time); snapshot_time is always stamped.
     void adopt_snapshot_locked(ProductState& st, const char* prod_id,
                                uint32_t seq, const std::vector<SnapshotEntry>& entries,
-                               const char* info_time);
+                               const char* content_time, const char* snapshot_time);
     // Deliver is_stale=true for every currently-trusted book, then clear
     // the books, per-product serials and the snapshot quarantine. Channel
     // trackers are NOT touched: an I002 resets only its own group's serial,
