@@ -71,7 +71,10 @@ void TaifexParser::set_order_book_manager(OrderBookManager* mgr) {
 }
 
 void TaifexParser::end_loop() {
-    running = false;    
+    // `running = false` MUST precede shutdown(): the shutdown wakes the
+    // blocked recvfrom (with a zero-length return), and the loop's re-check
+    // of `running` is what lets the thread exit.
+    running = false;
     if (sockfd != -1) {
         shutdown(sockfd, SHUT_RDWR);
         close(sockfd);
@@ -146,8 +149,13 @@ void TaifexParser::receive_loop() {
         ssize_t len = recvfrom(sockfd, buffer, sizeof(buffer), 0, (struct sockaddr*)&client_addr, &addr_len);
         if (len > 0) {
             process_datagram(buffer, static_cast<size_t>(len));
-        } else if (len < 0) {
-            if (errno != EINTR && errno != EBADF) {
+        } else {
+            // len == 0 means the socket was shut down (end_loop). shutdown()
+            // returns ENOTCONN on an unconnected UDP socket but still wakes
+            // this recvfrom, which then returns 0 forever — without this
+            // branch the loop would spin at 100% CPU whenever `running` is
+            // not already false.
+            if (len < 0 && errno != EINTR && errno != EBADF) {
                 std::cerr << "[ERROR] recvfrom error: " << strerror(errno) << std::endl;
             }
             break;
