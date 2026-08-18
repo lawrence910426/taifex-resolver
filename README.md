@@ -159,30 +159,21 @@ Notes:
 
 ## Testing
 
-Navigate to the root directory of this repository and execute the following commands:
+The interactive parser-vs-mocker environment lives in `test/run_testing.sh` (requires Docker and tmux):
 
 ```
-cd test
-bash bash.sh
+bash test/run_testing.sh
 ```
 
-This script initiates the test suite using Docker to ensure a clean environment for network simulation.
-
-### Test Setup
-
-The test environment utilizes two main components:
-1. Parser Container: Runs the resolver to decode incoming TAIFEX UDP packets.
-2. Mocker (TAIFEX_mocker.py): Simulates the exchange by replaying packets towards the parser.
-
-You should go into the Docker container to run the test and observe the real-time decoding.
+It builds the project, builds a Docker image, and opens a tmux session with the resolver in one pane and `TAIFEX_mocker.py` in the other.
 
 ### Run the C++ example
 
-Run the C++ example in standard listening mode. In a separate terminal, you can follow the logs: tail -f build/logger/taifex_parser.log.
+Run the C++ example in local-replay mode (no `-mode`, so the socket accepts loopback unicast). It logs to `logger/taifex_parser.log` relative to the current working directory — run it from `build/` and the log is `build/logger/taifex_parser.log`.
 
 ```
 cd build
-./taifex_resolver_cpp -port 14000 -snapshot-port 14700
+./taifex_resolver_cpp
 ```
 
 Book transitions are also echoed to stdout as `[BOOK][FRESH]` / `[BOOK][STALE]` lines.
@@ -193,7 +184,7 @@ Book transitions are also echoed to stdout as `[BOOK][FRESH]` / `[BOOK][STALE]` 
 
 ```
 # terminal 1
-./build/taifex_resolver_cpp -port 14000 -snapshot-port 14700
+./build/taifex_resolver_cpp
 # terminal 2
 python3 test/TAIFEX_mocker.py --scenario gap
 ```

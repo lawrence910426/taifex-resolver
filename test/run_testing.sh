@@ -27,7 +27,7 @@ fi
 cd "$PROJECT_ROOT"
 
 echo "--- [3/4] Building Docker Image ---"
-docker build -t $IMAGE_NAME .
+docker build -f dockerfile -t $IMAGE_NAME .
 
 echo "--- [4/4] Starting tmux environment ---"
 tmux new-session -d -s $SESSION_NAME
@@ -38,7 +38,7 @@ tmux split-window -h -t $SESSION_NAME
 
 # Right window: Run the NEW image with --network host
 # We use the built binary inside the container
-tmux send-keys -t $SESSION_NAME "docker run -d --rm --network host --name $CONTAINER_NAME $IMAGE_NAME ./build/taifex_resolver_cpp -port 14000 && sleep 1 \
+tmux send-keys -t $SESSION_NAME "docker run -d --rm --network host --name $CONTAINER_NAME $IMAGE_NAME ./build/taifex_resolver_cpp && sleep 1 \
     && docker exec -it $CONTAINER_NAME tail -f logger/taifex_parser.log" C-m
 
 # Left window: Prepare Mocker command
