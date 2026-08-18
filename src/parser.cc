@@ -46,11 +46,16 @@ bool TaifexParser::verify_checksum(const uint8_t* data, size_t len) {
     return calculated_xor == data[len - 3];
 }
 
-void TaifexParser::start_loop(int port, I024Callback cb24, I025Callback cb25, I081Callback cb81, I083Callback cb83, I084Callback cb84) {
-    if (running) return;
-    running = true;
+bool TaifexParser::start_loop(int port, I024Callback cb24, I025Callback cb25, I081Callback cb81, I083Callback cb83, I084Callback cb84) {
+    if (running) return true;
     set_callbacks(cb24, cb25, cb81, cb83, cb84);
-    recv_thread = std::thread(&TaifexParser::receive_loop, this, port);
+    // Socket setup runs HERE, on the caller's thread, before the receive
+    // thread is spawned: every failure must reach the caller, and only
+    // end_loop may ever tear the socket down once the thread exists.
+    if (!setup_socket(port)) return false;
+    running = true;
+    recv_thread = std::thread(&TaifexParser::receive_loop, this);
+    return true;
 }
 
 void TaifexParser::set_callbacks(I024Callback cb24, I025Callback cb25, I081Callback cb81, I083Callback cb83, I084Callback cb84) {
@@ -75,9 +80,12 @@ void TaifexParser::end_loop() {
     if (recv_thread.joinable()) recv_thread.join();
 }
 
-void TaifexParser::receive_loop(int port) {
+bool TaifexParser::setup_socket(int port) {
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0) return;
+    if (sockfd < 0) {
+        std::cerr << "[ERROR] socket() failed: " << strerror(errno) << std::endl;
+        return false;
+    }
 
     int reuse = 1;
     setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
@@ -100,8 +108,11 @@ void TaifexParser::receive_loop(int port) {
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
     if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        std::cerr << "[ERROR] Bind failed on port " << port << std::endl;
-        return;
+        std::cerr << "[ERROR] bind failed on port " << port << ": "
+                  << strerror(errno) << std::endl;
+        close(sockfd);
+        sockfd = -1;
+        return false;
     }
 
     if (use_multicast) {
@@ -124,7 +135,10 @@ void TaifexParser::receive_loop(int port) {
                       << " — continuing" << std::endl;
         }
     }
+    return true;
+}
 
+void TaifexParser::receive_loop() {
     uint8_t buffer[4096];
     while (running) {
         struct sockaddr_in client_addr;

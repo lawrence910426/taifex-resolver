@@ -256,8 +256,8 @@ PYBIND11_MODULE(taifex_udp_resolver, m) {
                 std::function<void(const I081_Packet &)> cb_i081,
                 std::function<void(const I083_Packet &)> cb_i083,
                 std::function<void(const I084_Packet &)> cb_i084) {
-                 self.start_loop(port, cb_i024, cb_i025, cb_i081, cb_i083,
-                                 cb_i084);
+                 return self.start_loop(port, cb_i024, cb_i025, cb_i081,
+                                        cb_i083, cb_i084);
              },
              py::arg("port"),
              py::arg("cb_i024"),
@@ -268,7 +268,9 @@ PYBIND11_MODULE(taifex_udp_resolver, m) {
              "Start the UDP receive loop. One callback per message type, in\n"
              "message-ID order; pass None for any type you do not need. Each\n"
              "callback is invoked from the receive thread; the GIL is\n"
-             "acquired automatically by pybind11.")
+             "acquired automatically by pybind11.\n"
+             "Returns False when socket setup failed (bad configuration,\n"
+             "bind error); the receive thread is not started in that case.")
         // end_loop joins the receive thread, which may be blocked acquiring
         // the GIL to deliver a callback — the GIL must be released while
         // waiting or shutdown deadlocks.
