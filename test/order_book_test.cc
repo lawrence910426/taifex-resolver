@@ -133,6 +133,17 @@ static I084_Packet make_i084_o(uint32_t last_prod_msg_seq,
                              channel_seq);
 }
 
+// I084 'A' (Refresh Begin) / 'Z' (Refresh Complete): LAST-SEQ only, no body.
+static I084_Packet make_i084_az(char type, uint32_t last_seq,
+                                uint32_t channel_seq) {
+    I084_Packet p{};
+    p.header = make_header('C', channel_seq, kSnapChannel);
+    p.message_type = type;
+    p.last_seq = last_seq;
+    p.no_entries = 0;
+    return p;
+}
+
 static I024_Packet make_i024(uint32_t seq, uint32_t channel_seq,
                              const char* prod = kProd) {
     I024_Packet p{};
@@ -420,6 +431,30 @@ static void test_i084_multi_product() {
     CHECK(recC.books.size() == 1);
     CHECK(level_is(recC.last().asks[0], 300, 3));
     CHECK(mgr.product_ids().size() == 3);
+}
+
+// I084 'A' (Refresh Begin) and 'Z' (Refresh Complete) carry only LAST-SEQ —
+// a CHANNEL-SEQ of the realtime transmission group, a different number space
+// from PROD-MSG-SEQ. The manager deliberately ignores them: they must create
+// no book, fire no callback, and leave existing books untouched.
+static void test_i084_a_z_are_ignored_by_manager() {
+    OrderBookManager mgr;
+    Recorder rec;
+    mgr.register_callback_all(rec.cb());
+
+    feed(mgr, make_i084_az('A', 500, 1));
+    feed(mgr, make_i084_az('Z', 505, 3));
+    CHECK(rec.books.empty());
+    CHECK(mgr.product_ids().empty());
+
+    // With a live book present they must still change nothing.
+    feed(mgr, make_i083(10, {make_snapshot_entry('0', 10315, 2, 1)}, 1));
+    size_t deliveries = rec.books.size();
+    feed(mgr, make_i084_az('A', 900, 1));
+    feed(mgr, make_i084_az('Z', 905, 3));
+    CHECK(rec.books.size() == deliveries);
+    CHECK(mgr.get_book(kProd)->last_prod_msg_seq == 10);
+    CHECK(!mgr.get_book(kProd)->is_stale);
 }
 
 // Corrupt/hostile MD entries (price_level 0 or >5, unknown entry_type or
@@ -768,6 +803,7 @@ int main() {
     RUN(test_gap_marks_stale_and_applies_best_effort);
     RUN(test_i084_recovery_then_fresh);
     RUN(test_i084_multi_product);
+    RUN(test_i084_a_z_are_ignored_by_manager);
     RUN(test_malformed_entries_ignored);
     RUN(test_i083_recovery_from_stale);
     RUN(test_i083_equal_seq_adoption_while_stale);
