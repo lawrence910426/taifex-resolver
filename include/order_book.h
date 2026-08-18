@@ -57,8 +57,12 @@ struct OrderBook {
 //     flag (proof that the loss did not concern it).
 //   - A snapshot (normal I083, or each I084 'O' product entry) with
 //     seq >= last is adopted wholesale and clears both flags.
-//   - I002 sequence reset (message_kind '2') clears all books and trackers,
-//     as mandated by the TAIFEX spec.
+//   - I002 sequence reset (message_kind '2') on a realtime channel clears
+//     all books and per-product serials, as mandated by the TAIFEX spec. The
+//     spec scopes that wipe to 即時行情 groups, so an I002 arriving on a
+//     channel known to carry snapshots (I084) resets only that channel's own
+//     sequence tracker. A channel not yet seen carrying I084 is treated as
+//     realtime (the identity is learned from traffic).
 //
 // Delivered is_stale = !synced || suspect.
 //
@@ -145,8 +149,12 @@ private:
     void adopt_snapshot_locked(ProductState& st, const char* prod_id,
                                uint32_t seq, const std::vector<SnapshotEntry>& entries,
                                const char* info_time);
-    // Deliver is_stale=true for every currently-trusted book, then clear all
-    // books and trackers (I002 semantics).
+    // Deliver is_stale=true for every currently-trusted book, then clear
+    // the books, per-product serials and the snapshot quarantine. Channel
+    // trackers are NOT touched: an I002 resets only its own group's serial,
+    // and reset() layers the full tracker wipe on top.
+    void collect_book_wipe_locked(std::vector<Delivery>& out);
+    // Full I002-equivalent reset (books + every channel tracker); reset().
     void collect_reset_locked(std::vector<Delivery>& out);
     // Append one Delivery for the product: a single stamped snapshot copy of
     // `live_book` plus the callbacks registered for it (per-product first,

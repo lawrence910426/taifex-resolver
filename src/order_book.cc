@@ -125,7 +125,7 @@ void OrderBookManager::adopt_snapshot_locked(ProductState& st, const char* prod_
     st.suspect = false;
 }
 
-void OrderBookManager::collect_reset_locked(std::vector<Delivery>& out) {
+void OrderBookManager::collect_book_wipe_locked(std::vector<Delivery>& out) {
     // The reset invalidates every book; tell subscribers whose last delivered
     // snapshot claimed to be trusted (mirrors the channel-gap stale-flip
     // sweep).
@@ -135,11 +135,15 @@ void OrderBookManager::collect_reset_locked(std::vector<Delivery>& out) {
         collect_delivery_locked(kv.first, st.book, /*is_stale=*/true, out);
     }
     products_.clear();
-    channels_.clear();
     // Quarantine the snapshot carousel until its next Refresh Begin: an 'O'
     // block assembled before this reset must not re-base a cleared product
     // at its pre-reset serial (see the field comment in order_book.h).
     snapshot_quarantine_ = true;
+}
+
+void OrderBookManager::collect_reset_locked(std::vector<Delivery>& out) {
+    collect_book_wipe_locked(out);
+    channels_.clear();
 }
 
 void OrderBookManager::collect_delivery_locked(
@@ -173,10 +177,18 @@ void OrderBookManager::on_header(const Header& header) {
         std::lock_guard<std::mutex> lock(mtx_);
 
         if (header.message_kind == '2') {
-            // I002 sequence reset: the spec mandates clearing the order books
-            // and every sequence tracker. Subscribers are told their book is
-            // no longer trusted before the state disappears.
-            collect_reset_locked(deliveries);
+            // I002 sequence reset. The spec scopes the book wipe to realtime
+            // groups (「若該 CHANNEL 屬即時行情群組則須清空各商品委託簿…」)
+            // and to resetting THAT group's serial — so a reset on a channel
+            // known to carry snapshots touches only its own tracker, and a
+            // realtime reset leaves other channels' trackers alone.
+            auto it = channels_.find(header.channel_id);
+            if (it != channels_.end() && it->second.is_snapshot_channel) {
+                it->second.last_seq = 0;
+            } else {
+                collect_book_wipe_locked(deliveries);
+                if (it != channels_.end()) it->second.last_seq = 0;
+            }
         } else {
             do {
                 auto it = channels_.find(header.channel_id);

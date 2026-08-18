@@ -748,6 +748,44 @@ static void test_reset_then_inflight_i084_is_quarantined() {
     CHECK(!rec.last().is_stale);
 }
 
+// The spec scopes the I002 book wipe to realtime groups. An I002 arriving on
+// a channel known to carry snapshots must reset only that channel's own
+// sequence tracker — the books and the realtime tracker survive.
+static void test_i002_on_snapshot_channel_does_not_wipe() {
+    OrderBookManager mgr;
+    Recorder rec;
+    mgr.register_callback_all(rec.cb());
+    // Realtime book, fresh; the 'O' feed teaches the manager that
+    // kSnapChannel carries snapshots.
+    feed(mgr, make_i083(10, {make_snapshot_entry('0', 10315, 2, 1)}, 1));
+    feed(mgr, make_i084_o(5, {make_snapshot_entry('0', 200, 2, 1)}, 1, "MXFG6"));
+    size_t deliveries = rec.books.size();
+
+    mgr.on_header(make_header('2', 0, kSnapChannel));
+
+    CHECK(rec.books.size() == deliveries);          // no stale flip delivered
+    CHECK(mgr.get_book(kProd).has_value());          // books survive
+    CHECK(!mgr.get_book(kProd)->is_stale);
+    CHECK(mgr.get_book("MXFG6").has_value());
+    CHECK(mgr.product_ids().size() == 2);
+
+    // Realtime continuity is untouched: the next contiguous message applies
+    // and stays fresh (a wiped tracker would have re-registered instead).
+    feed(mgr, make_i081(11, {make_entry('0', '0', 10400, 7, 1)}, 2));
+    CHECK(!mgr.get_book(kProd)->is_stale);
+    CHECK(level_is(mgr.get_book(kProd)->bids[0], 10400, 7));
+
+    // The snapshot channel's own serial restarted: seq 1 after the reset is
+    // not a duplicate and must not flag a gap (it is a snapshot channel —
+    // gaps there are ignored anyway; this just proves the tracker reset).
+    feed(mgr, make_i084_o(12, {make_snapshot_entry('0', 10401, 1, 1)}, 1));
+    CHECK(mgr.get_book(kProd)->last_prod_msg_seq == 12);
+
+    // An I002 on the realtime channel still wipes everything.
+    mgr.on_header(make_header('2', 0));
+    CHECK(mgr.product_ids().empty());
+}
+
 static void test_callback_routing() {
     OrderBookManager mgr;
     Recorder recA, recA2, recB, recAll;
@@ -856,6 +894,7 @@ int main() {
     RUN(test_snapshot_channel_gap_ignored);
     RUN(test_i002_reset_clears_everything);
     RUN(test_reset_then_inflight_i084_is_quarantined);
+    RUN(test_i002_on_snapshot_channel_does_not_wipe);
     RUN(test_callback_routing);
     RUN(test_reentrant_callback);
     RUN(test_two_thread_feed_smoke);
