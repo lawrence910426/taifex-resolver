@@ -20,7 +20,7 @@ inline constexpr int TAIFEX_BOOK_DEPTH = 5;
 struct OrderBookLevel {
     bool valid = false;         // level occupied
     char price_sign = '0';      // '0': positive, '-': negative
-    uint64_t price = 0;         // raw 9(9) integer; scale by decimal_locator
+    uint64_t price = 0;         // raw 9(9) integer price
     uint32_t quantity = 0;
 };
 
@@ -35,7 +35,6 @@ struct OrderBook {
     bool is_stale = true;            // true = increment chain broken or unproven
     bool has_snapshot = false;       // ever adopted an I083 / I084-'O' base
     char info_time[16] = {0};        // header INFORMATION-TIME of driving message
-    uint8_t decimal_locator = 3;     // I081/I083/I084 prices carry 3 decimals
     std::array<OrderBookLevel, TAIFEX_BOOK_DEPTH> bids{};
     std::array<OrderBookLevel, TAIFEX_BOOK_DEPTH> asks{};
     std::array<OrderBookLevel, TAIFEX_BOOK_DEPTH> derived_bids{};
@@ -144,7 +143,7 @@ private:
     // (seq > last). Handles duplicate drop and gap -> synced=false.
     bool track_seq_locked(ProductState& st, uint32_t seq);
     void adopt_snapshot_locked(ProductState& st, const char* prod_id,
-                               uint32_t seq, const std::vector<MDEntry>& entries,
+                               uint32_t seq, const std::vector<SnapshotEntry>& entries,
                                const char* info_time);
     // Deliver is_stale=true for every currently-trusted book, then clear all
     // books and trackers (I002 semantics).

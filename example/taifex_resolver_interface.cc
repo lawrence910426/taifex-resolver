@@ -21,20 +21,6 @@ auto get_full_price = [](char sign, uint64_t price) {
     return s + std::to_string(price);
 };
 
-auto    get_formatted_price = [](char sign, uint64_t price, int decimal_places) {
-    std::string s_price = std::to_string(price);
-    
-    if (s_price.length() <= (size_t)decimal_places) {
-        s_price.insert(0, decimal_places - s_price.length() + 1, '0');
-    }
-
-    if (decimal_places > 0) {
-        s_price.insert(s_price.length() - decimal_places, ".");
-    }
-
-    return (sign == '-' ? "-" : "") + s_price;
-};
-
 std::string to_hex_str(uint32_t val) {
     std::stringstream ss;
     ss << "0x" << std::hex << std::uppercase << val;
@@ -77,14 +63,14 @@ void on_trade_match(const I024_Packet& pkt) {
        << "Extra Match Levels : " << multi_match_count << " levels\n";
 
 
-    as << "First Deal: Price = " << get_formatted_price(pkt.first_price_sign, pkt.first_price, pkt.first_price_decimal)
+    as << "First Deal: Price = " << get_full_price(pkt.first_price_sign, pkt.first_price)
        << ", Quantity = " << pkt.first_quantity << "\n";
 
 
     if (multi_match_count > 0) {
         for (const auto& m : pkt.consecutive_matches) {
             as << "Next Deal: " 
-               << get_formatted_price(m.price_sign, m.price, m.decimal_locator) 
+               << get_full_price(m.price_sign, m.price)
                << " Qty: " << m.quantity << "\n";
         }
     }
@@ -103,8 +89,8 @@ void on_day_high_low(const I025_Packet& pkt) {
        << "Channel Seq        : " << pkt.header.channel_seq << "\n"
        << "Prod ID            : " << pkt.prod_id << "\n"
        << "Prod Msg Seq       : " << pkt.prod_msg_seq << "\n"
-       << "Day High           : " << get_formatted_price(pkt.day_high_price_sign, pkt.day_high_price, pkt.decimal_locator) << "\n"
-       << "Day Low            : " << get_formatted_price(pkt.day_low_price_sign, pkt.day_low_price, pkt.decimal_locator) << "\n"
+       << "Day High           : " << get_full_price(pkt.day_high_price_sign, pkt.day_high_price) << "\n"
+       << "Day Low            : " << get_full_price(pkt.day_low_price_sign, pkt.day_low_price) << "\n"
        << "Show Time          : " << pkt.show_time << "\n";
     Logger::getInstance().log(ss.str());
 }
@@ -149,7 +135,7 @@ void on_incremental(const I081_Packet& pkt) {
 
         as << "[" << act << "][" << side << "] "
            << "Lvl " << (int)entry.price_level 
-           << " | Price: " << get_formatted_price(entry.price_sign, entry.price, entry.decimal_locator)
+           << " | Price: " << get_full_price(entry.price_sign, entry.price)
            << " | Qty: " << entry.quantity << "\n";
     }
     
@@ -196,9 +182,9 @@ void on_snapshot(const I083_Packet& pkt) {
             if (pkt.calculated_flag == '1') {
                 if (entry.price == 999999999) price_display = "Market";
                 else if (entry.price == 999999999 && entry.price_sign == '-') price_display = "Market";
-                else price_display = get_formatted_price(entry.price_sign, entry.price, entry.decimal_locator);
+                else price_display = get_full_price(entry.price_sign, entry.price);
             } else {
-                price_display = get_formatted_price(entry.price_sign, entry.price, entry.decimal_locator);
+                price_display = get_full_price(entry.price_sign, entry.price);
             }
                 as << "[" << type_str << "] "
                    << "Level " << (int)entry.price_level 
@@ -246,7 +232,7 @@ void on_refresh(const I084_Packet& pkt) {
                     default:  type_str = "Unknown";
                 }
                 as << "  [" << type_str << "] Level " << (int)entry.price_level
-                   << " | Price: " << get_formatted_price(entry.price_sign, entry.price, entry.decimal_locator)
+                   << " | Price: " << get_full_price(entry.price_sign, entry.price)
                    << " | Qty: " << entry.quantity << "\n";
             }
         }
@@ -275,7 +261,7 @@ void handle_futopt_order_book(const OrderBook& book) {
         for (int i = 0; i < TAIFEX_BOOK_DEPTH; ++i) {
             if (!side[i].valid) continue;
             ss << "  [" << name << "] Level " << (i + 1)
-               << " | Price: " << get_formatted_price(side[i].price_sign, side[i].price, book.decimal_locator)
+               << " | Price: " << get_full_price(side[i].price_sign, side[i].price)
                << " | Qty: " << side[i].quantity << "\n";
         }
     };

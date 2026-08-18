@@ -22,27 +22,30 @@ struct Header {
     uint16_t body_len;       // 9(4)  - BCD 2 bytes
 };
 
-struct Footer {
-    uint8_t checksum;       // X(1) - XOR checksum of the entire packet
-    uint16_t terminal_code; // X(2) - Fixed 0x0D0A (\r\n)
-};
-
+// I081 incremental entry: carries MD-UPDATE-ACTION (snapshots do not).
 struct MDEntry {
-    // Note: I083 entries might not use update_action, but shared for memory efficiency
     char update_action;      // X(1) - 0:New, 1:Change, 2:Delete, 5:Overlay
     char entry_type;         // X(1) - 0:Buy, 1:Sell, E:Derived Buy, F:Derived Sell
     char price_sign;         // X(1) - '0':Positive, '-':Negative
     uint64_t price;          // 9(9)  - BCD 5 bytes
     uint32_t quantity;       // 9(8)  - BCD 4 bytes
     uint8_t price_level;     // 9(2)  - BCD 1 byte
-    uint8_t decimal_locator; // documented decimal point (Note:     I081 and I084 are 3)
+};
+
+// I083 / I084-'O' snapshot entry: the same wire fields as MDEntry minus
+// update_action, which snapshot messages do not carry.
+struct SnapshotEntry {
+    char entry_type;         // X(1) - 0:Buy, 1:Sell, E:Derived Buy, F:Derived Sell
+    char price_sign;         // X(1) - '0':Positive, '-':Negative
+    uint64_t price;          // 9(9)  - BCD 5 bytes
+    uint32_t quantity;       // 9(8)  - BCD 4 bytes
+    uint8_t price_level;     // 9(2)  - BCD 1 byte
 };
 
 struct MatchData {
     char price_sign;         // X(1) - '0':Positive, '-':Negative
     uint64_t price;          // 9(9) - BCD 5 bytes
     uint16_t quantity;       // 9(4) - BCD 2 bytes (Note: I024 repeat qty is 2 bytes)
-    uint8_t decimal_locator; // documented decimal point (Note: I024 is 2)
 };
 
 // --- 2. Specific Message Bodies ---
@@ -60,7 +63,6 @@ struct I024_Packet {
     char first_price_sign;   // X(1)
     uint64_t first_price;    // 9(9) - BCD 5 bytes
     uint32_t first_quantity; // 9(8) - BCD 4 bytes
-    uint8_t first_price_decimal = 2;
 
     // --- Dynamic Control ---
     uint8_t display_item;    // X(1) - Bit Map (Bit 0-6 defines number of repeats)
@@ -72,8 +74,6 @@ struct I024_Packet {
     uint32_t total_qty;      // 9(8) - BCD 4 bytes
     uint32_t buy_cnt;        // 9(8) - BCD 4 bytes
     uint32_t sell_cnt;       // 9(8) - BCD 4 bytes
-
-    Footer footer;           // Checksum and Terminal Code
 };
 
 // I025: Intraday Day-High/Low Price Disclosure. Parsed mainly because it
@@ -88,8 +88,6 @@ struct I025_Packet {
     char day_low_price_sign;    // X(1)
     uint64_t day_low_price;     // 9(9)  - BCD 5 bytes
     char show_time[16];         // 9(12) - BCD 6 bytes (HHMMSSuuuuuu)
-    uint8_t decimal_locator = 2;  // traded prices, same treatment as I024
-    Footer footer;
 };
 
 // I081: Incremental Order Book Update
@@ -99,7 +97,6 @@ struct I081_Packet {
     uint32_t prod_msg_seq;   // 9(10) - BCD 5 bytes
     uint8_t no_md_entries;   // 9(2)  - BCD 1 byte
     std::vector<MDEntry> entries;
-    Footer footer;
 };
 
 // I083: Order Book Snapshot
@@ -109,8 +106,7 @@ struct I083_Packet {
     uint32_t prod_msg_seq;   // 9(10) - BCD 5 bytes
     char calculated_flag;    // X(1)  - 0:Normal, 1:Calculated (Missing in I081)
     uint8_t no_md_entries;   // 9(2)  - BCD 1 byte
-    std::vector<MDEntry> entries;
-    Footer footer;
+    std::vector<SnapshotEntry> entries;
 };
 
 // I084 'O' (Order Data): one product block, repeated NO-ENTRIES times.
@@ -118,7 +114,7 @@ struct I084Product {
     char prod_id[21];           // X(20)
     uint32_t last_prod_msg_seq; // 9(10) - BCD 5 bytes (商品行情訊息末筆處理序號)
     uint8_t no_md_entries;      // 9(2)  - BCD 1 byte (0 => empty book)
-    std::vector<MDEntry> entries;
+    std::vector<SnapshotEntry> entries;
 };
 
 // I084: Snapshot Refresh (快照更新訊息), message_kind 'C'. The 1-byte
@@ -130,7 +126,6 @@ struct I084_Packet {
     uint32_t last_seq;          // 9(10) - BCD 5 bytes ('A'/'Z'; 0 otherwise)
     uint8_t no_entries;         // 9(2)  - BCD 1 byte ('O' product count; 0 otherwise)
     std::vector<I084Product> products; // 'O' only
-    Footer footer;
 };
 
 // --- 3. Parser Class ---

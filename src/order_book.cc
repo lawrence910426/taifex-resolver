@@ -102,14 +102,14 @@ bool OrderBookManager::track_seq_locked(ProductState& st, uint32_t seq) {
 
 void OrderBookManager::adopt_snapshot_locked(ProductState& st, const char* prod_id,
                                              uint32_t seq,
-                                             const std::vector<MDEntry>& entries,
+                                             const std::vector<SnapshotEntry>& entries,
                                              const char* info_time) {
     OrderBook& book = st.book;
     book.bids.fill(OrderBookLevel{});
     book.asks.fill(OrderBookLevel{});
     book.derived_bids.fill(OrderBookLevel{});
     book.derived_asks.fill(OrderBookLevel{});
-    for (const MDEntry& entry : entries) {
+    for (const SnapshotEntry& entry : entries) {
         auto* ladder = side_ladder(book, entry.entry_type);
         if (!ladder) continue;
         if (entry.price_level < 1 || entry.price_level > TAIFEX_BOOK_DEPTH) continue;

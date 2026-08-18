@@ -185,7 +185,6 @@ bool TaifexParser::handle_i024(const uint8_t* data, const Header& header) {
     // 4. First Price 
     pkt.first_price_sign = data[offset++];
     pkt.first_price = bcd_to_uint(data + offset, 5);
-    pkt.first_price_decimal = 2;
     offset += 5;
 
     // 5. First Qty 
@@ -201,7 +200,6 @@ bool TaifexParser::handle_i024(const uint8_t* data, const Header& header) {
         MatchData md;
         md.price_sign = data[offset++];
         md.price = bcd_to_uint(data + offset, 5);
-        md.decimal_locator = 2; 
         offset += 5;
         md.quantity = (uint16_t)bcd_to_uint(data + offset, 2); 
         offset += 2;
@@ -249,8 +247,6 @@ bool TaifexParser::handle_i025(const uint8_t* data, size_t length, const Header&
     format_bcd_time_to_char(data + offset, pkt.show_time, true);
     offset += 6;
 
-    pkt.decimal_locator = 2;
-
     if (book_mgr_) book_mgr_->on_i025(pkt);
     if (on_i025) on_i025(pkt);
     return true;
@@ -279,7 +275,6 @@ bool TaifexParser::handle_i081(const uint8_t* data, const Header& header) {
         entry.entry_type = data[offset++];
         entry.price_sign = data[offset++];
         entry.price = bcd_to_uint(data + offset, 5);
-        entry.decimal_locator = 3;
         offset += 5;
         entry.quantity = (uint32_t)bcd_to_uint(data + offset, 4);
         offset += 4;
@@ -313,12 +308,10 @@ bool TaifexParser::handle_i083(const uint8_t* data, const Header& header) {
     offset += 1;
 
     for (int i = 0; i < pkt.no_md_entries; ++i) {
-        MDEntry entry;
-        entry.update_action = ' '; // Not applicable for snapshot
+        SnapshotEntry entry;
         entry.entry_type = data[offset++];
         entry.price_sign = data[offset++];
         entry.price = bcd_to_uint(data + offset, 5);
-        entry.decimal_locator = 3;
         offset += 5;
         entry.quantity = (uint32_t)bcd_to_uint(data + offset, 4);
         offset += 4;
@@ -369,12 +362,10 @@ bool TaifexParser::handle_i084(const uint8_t* data, const Header& header) {
                 offset += 1;
 
                 for (int i = 0; i < prod.no_md_entries; ++i) {
-                    MDEntry entry;
-                    entry.update_action = ' '; // Not applicable for snapshot
+                    SnapshotEntry entry;
                     entry.entry_type = data[offset++];
                     entry.price_sign = data[offset++];
                     entry.price = bcd_to_uint(data + offset, 5);
-                    entry.decimal_locator = 3;
                     offset += 5;
                     entry.quantity = (uint32_t)bcd_to_uint(data + offset, 4);
                     offset += 4;
