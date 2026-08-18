@@ -4,6 +4,7 @@
 #include <cstring>
 #include "parser.h"
 #include "order_book.h"
+#include "taifex_channels.h"
 
 namespace py = pybind11;
 
@@ -226,8 +227,56 @@ static void bind_order_book_manager(py::module_ &m) {
              "delivers a stale-flagged copy of every trusted book first.");
 }
 
+namespace {
+
+// Single-channel mode names, matching the MODE vocabulary the parquet
+// pipeline's gen_parquet.sh already uses: one capture file == one channel.
+struct ModeRow {
+    const char* name;
+    taifex::constants::Session session;
+    taifex::constants::Product product;
+    taifex::constants::Service service;
+};
+constexpr ModeRow kModes[] = {
+    {"FUTURES_DAY",            taifex::constants::Session::Day,   taifex::constants::Product::Futures, taifex::constants::Service::Realtime},
+    {"FUTURES_NIGHT",          taifex::constants::Session::Night, taifex::constants::Product::Futures, taifex::constants::Service::Realtime},
+    {"OPTIONS_DAY",            taifex::constants::Session::Day,   taifex::constants::Product::Options, taifex::constants::Service::Realtime},
+    {"OPTIONS_NIGHT",          taifex::constants::Session::Night, taifex::constants::Product::Options, taifex::constants::Service::Realtime},
+    {"FUTURES_DAY_SNAPSHOT",   taifex::constants::Session::Day,   taifex::constants::Product::Futures, taifex::constants::Service::SnapshotRefresh},
+    {"FUTURES_NIGHT_SNAPSHOT", taifex::constants::Session::Night, taifex::constants::Product::Futures, taifex::constants::Service::SnapshotRefresh},
+    {"OPTIONS_DAY_SNAPSHOT",   taifex::constants::Session::Day,   taifex::constants::Product::Options, taifex::constants::Service::SnapshotRefresh},
+    {"OPTIONS_NIGHT_SNAPSHOT", taifex::constants::Session::Night, taifex::constants::Product::Options, taifex::constants::Service::SnapshotRefresh},
+};
+
+}  // namespace
+
 PYBIND11_MODULE(taifex_udp_resolver, m) {
     m.doc() = "TAIFEX UDP Resolver (Python interface)";
+
+    // The manual's endpoint table, keyed by mode name. No caller should ever
+    // type a multicast address by hand.
+    {
+        py::tuple modes(std::size(kModes));
+        for (size_t i = 0; i < std::size(kModes); ++i)
+            modes[i] = py::str(kModes[i].name);
+        m.attr("MODES") = modes;
+    }
+    m.def("endpoint",
+          [](const std::string& mode) {
+              for (const ModeRow& row : kModes) {
+                  if (mode == row.name) {
+                      const taifex::constants::Channel* ch =
+                          taifex::constants::find(row.session, row.product, row.service);
+                      return py::make_tuple(std::string(ch->group), ch->port);
+                  }
+              }
+              throw py::value_error("unknown mode '" + mode +
+                                    "'; see taifex_udp_resolver.MODES");
+          },
+          py::arg("mode"),
+          "Return (multicast_group, port) for a mode name from MODES,\n"
+          "transcribed from the TAIFEX manual (V0.9.5). One mode == one\n"
+          "multicast channel.");
 
     bind_header(m);
     bind_match_data(m);
