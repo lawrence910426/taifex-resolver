@@ -83,7 +83,45 @@ void TaifexParser::end_loop() {
     if (recv_thread.joinable()) recv_thread.join();
 }
 
+namespace {
+std::string trim_copy(const std::string& s) {
+    size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
+}
+}  // namespace
+
 bool TaifexParser::setup_socket(int port) {
+    // Resolve group + interface up front so a malformed configuration fails
+    // here instead of silently degrading. inet_pton, not inet_addr: the
+    // legacy 3-part form does not fail — inet_addr("225.140.140") yields
+    // 225.140.0.140, a valid but WRONG group that would join cleanly and
+    // subscribe to the wrong feed with no error anywhere.
+    in_addr_t group_addr = htonl(INADDR_ANY);
+    in_addr_t iface_addr = htonl(INADDR_ANY);
+    if (use_multicast) {
+        const std::string group = trim_copy(multicast_group);
+        const std::string iface = trim_copy(interface_ip);
+        if (inet_pton(AF_INET, group.c_str(), &group_addr) != 1 ||
+            !IN_MULTICAST(ntohl(group_addr))) {
+            std::cerr << "[ERROR] invalid multicast group '" << multicast_group
+                      << "' — expected a dotted-quad IPv4 multicast address "
+                         "(four octets, no leading zeros)" << std::endl;
+            return false;
+        }
+        if (iface.empty() || inet_pton(AF_INET, iface.c_str(), &iface_addr) != 1) {
+            // Required: with imr_interface = INADDR_ANY the kernel resolves
+            // the join device by ROUTING THE GROUP ADDRESS. Hosts without a
+            // 224.0.0.0/4 route then join on the default-route interface —
+            // the join succeeds, the socket receives nothing, silently.
+            std::cerr << "[ERROR] interface IP is required with a multicast "
+                         "group and must be a local address; got '"
+                      << interface_ip << "'" << std::endl;
+            return false;
+        }
+    }
+
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) {
         std::cerr << "[ERROR] socket() failed: " << strerror(errno) << std::endl;
@@ -120,8 +158,8 @@ bool TaifexParser::setup_socket(int port) {
 
     if (use_multicast) {
         struct ip_mreq mreq{};
-        mreq.imr_multiaddr.s_addr = inet_addr(multicast_group.c_str());
-        mreq.imr_interface.s_addr = inet_addr(interface_ip.c_str());
+        mreq.imr_multiaddr.s_addr = group_addr;
+        mreq.imr_interface.s_addr = iface_addr;  // receive-side iface selector
 
         std::cerr << "[INFO] Attempting to join multicast group " << multicast_group
                   << " on interface " << interface_ip << std::endl;
@@ -132,7 +170,7 @@ bool TaifexParser::setup_socket(int port) {
         }
 
         struct in_addr local_interface{};
-        local_interface.s_addr = inet_addr(interface_ip.c_str());
+        local_interface.s_addr = iface_addr;
         if (setsockopt(sockfd, IPPROTO_IP, IP_MULTICAST_IF, &local_interface, sizeof(local_interface)) < 0) {
             std::cerr << "[WARN] IP_MULTICAST_IF failed: " << strerror(errno)
                       << " — continuing" << std::endl;
