@@ -178,11 +178,14 @@ private:
 
     // Parsing logic separated to handle the CALCULATED-FLAG offset
     bool parse_header(const uint8_t* data, Header& header);
-    bool handle_i024(const uint8_t* data, const Header& header);
+    // Every handler receives the framed message length and must stop before
+    // any read crosses `length - 3` (checksum + terminal): entry counts come
+    // from the packet itself and can lie even when BODY-LENGTH agrees.
+    bool handle_i024(const uint8_t* data, size_t length, const Header& header);
     bool handle_i025(const uint8_t* data, size_t length, const Header& header);
-    bool handle_i081(const uint8_t* data, const Header& header);
-    bool handle_i083(const uint8_t* data, const Header& header);
-    bool handle_i084(const uint8_t* data, const Header& header);
+    bool handle_i081(const uint8_t* data, size_t length, const Header& header);
+    bool handle_i083(const uint8_t* data, size_t length, const Header& header);
+    bool handle_i084(const uint8_t* data, size_t length, const Header& header);
 
     // Utility
     uint64_t bcd_to_uint(const uint8_t* bcd, size_t len);

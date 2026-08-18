@@ -865,6 +865,126 @@ static void test_two_thread_feed_smoke() {
     CHECK(deliveries.load() > 0);
 }
 
+
+// --- Wire-level decoding tests (drive TaifexParser::process_datagram) -----
+// Mirrors test/TAIFEX_mocker.py's packet construction: ESC + 18-byte header
+// + body + XOR checksum + 0x0D 0x0A terminal.
+
+static std::vector<uint8_t> wire_bcd(uint64_t v, int n) {
+    std::vector<uint8_t> out(n, 0);
+    for (int i = n - 1; i >= 0; --i) {
+        out[i] = (uint8_t)(((v / 10 % 10) << 4) | (v % 10));
+        v /= 100;
+    }
+    return out;
+}
+
+// body_len_override lets a test claim a BODY-LENGTH that disagrees with the
+// actual body (the checksum is still computed over the real bytes, so the
+// message reaches the length-agreement check, not the checksum check).
+static std::vector<uint8_t> wire_message(char kind, uint32_t channel_seq,
+                                         const std::vector<uint8_t>& body,
+                                         int body_len_override = -1) {
+    std::vector<uint8_t> content;
+    content.push_back('2');                 // TRANSMISSION-CODE
+    content.push_back((uint8_t)kind);       // MESSAGE-KIND
+    const uint8_t t[6] = {0x13, 0x15, 0x40, 0x00, 0x00, 0x00};
+    content.insert(content.end(), t, t + 6);                       // INFO-TIME
+    auto cid = wire_bcd(kRtChannel, 2);
+    content.insert(content.end(), cid.begin(), cid.end());          // CHANNEL-ID
+    auto seq = wire_bcd(channel_seq, 5);
+    content.insert(content.end(), seq.begin(), seq.end());          // CHANNEL-SEQ
+    content.push_back(0x01);                                        // VERSION-NO
+    auto bl = wire_bcd(body_len_override >= 0 ? (uint64_t)body_len_override
+                                              : (uint64_t)body.size(), 2);
+    content.insert(content.end(), bl.begin(), bl.end());            // BODY-LENGTH
+    content.insert(content.end(), body.begin(), body.end());
+    uint8_t x = 0;
+    for (uint8_t b : content) x ^= b;
+    std::vector<uint8_t> msg;
+    msg.push_back(0x1B);
+    msg.insert(msg.end(), content.begin(), content.end());
+    msg.push_back(x);
+    msg.push_back(0x0D);
+    msg.push_back(0x0A);
+    return msg;
+}
+
+// A checksum-valid message whose BODY-LENGTH disagrees with the framed
+// length must be dropped before any handler runs — the decoder would read
+// past the end of a truncated message otherwise.
+static void test_truncated_message_rejected() {
+    TaifexParser parser;
+    int i084_calls = 0;
+    parser.set_callbacks(nullptr, nullptr, nullptr, nullptr,
+                         [&](const I084_Packet&) { ++i084_calls; });
+
+    // Control: a well-formed 'A' (Refresh Begin) decodes.
+    std::vector<uint8_t> body = {'A'};
+    auto ls = wire_bcd(1000, 5);
+    body.insert(body.end(), ls.begin(), ls.end());
+    auto good = wire_message('C', 1, body);
+    parser.process_datagram(good.data(), good.size());
+    CHECK(i084_calls == 1);
+
+    // Same body but BODY-LENGTH claims 5 bytes MORE than are present: the
+    // 'A' decoder would read LAST-SEQ past the end. Must be dropped.
+    auto lying = wire_message('C', 2, body, (int)body.size() + 5);
+    parser.process_datagram(lying.data(), lying.size());
+    CHECK(i084_calls == 1);
+
+    // And a body physically too short for its type, with an agreeing
+    // BODY-LENGTH: 'A' with no LAST-SEQ at all.
+    auto stub = wire_message('C', 3, {'A'});
+    parser.process_datagram(stub.data(), stub.size());
+    CHECK(i084_calls == 1);
+}
+
+// A message whose BODY-LENGTH agrees with the frame but whose internal
+// entry COUNTS would walk past the end must be dropped without a partial
+// decode reaching the callbacks.
+static void test_lying_entry_count_rejected() {
+    TaifexParser parser;
+    int i084_calls = 0, i081_calls = 0;
+    parser.set_callbacks(nullptr, nullptr,
+                         [&](const I081_Packet&) { ++i081_calls; },
+                         nullptr,
+                         [&](const I084_Packet&) { ++i084_calls; });
+
+    // I084 'O' claiming 2 products but carrying only 1.
+    std::vector<uint8_t> body = {'O', 0x02};  // NO-ENTRIES = 2 (BCD)
+    const char* prod = "TXFG6               ";
+    body.insert(body.end(), prod, prod + 20);
+    auto seq = wire_bcd(5, 5);
+    body.insert(body.end(), seq.begin(), seq.end());
+    body.push_back(0x00);  // NO-MD-ENTRIES = 0
+    auto msg = wire_message('C', 1, body);
+    parser.process_datagram(msg.data(), msg.size());
+    CHECK(i084_calls == 0);
+
+    // I081 claiming 3 entries but carrying 1.
+    std::vector<uint8_t> b81(prod, prod + 20);
+    auto pseq = wire_bcd(7, 5);
+    b81.insert(b81.end(), pseq.begin(), pseq.end());
+    b81.push_back(0x03);  // NO-MD-ENTRIES = 3 (BCD)
+    std::vector<uint8_t> entry = {'0', '0', '0'};
+    auto px = wire_bcd(10315, 5);
+    entry.insert(entry.end(), px.begin(), px.end());
+    auto qty = wire_bcd(4, 4);
+    entry.insert(entry.end(), qty.begin(), qty.end());
+    entry.push_back(0x01);
+    b81.insert(b81.end(), entry.begin(), entry.end());
+    auto msg81 = wire_message('A', 2, b81);
+    parser.process_datagram(msg81.data(), msg81.size());
+    CHECK(i081_calls == 0);
+
+    // Control: the same I081 with an honest count decodes.
+    b81[25] = 0x01;  // NO-MD-ENTRIES = 1
+    auto ok81 = wire_message('A', 3, b81);
+    parser.process_datagram(ok81.data(), ok81.size());
+    CHECK(i081_calls == 1);
+}
+
 int main() {
     RUN(test_initial_build_from_i083);
     RUN(test_i081_new_append);
@@ -878,6 +998,8 @@ int main() {
     RUN(test_i084_recovery_then_fresh);
     RUN(test_i084_multi_product);
     RUN(test_i084_a_z_are_ignored_by_manager);
+    RUN(test_truncated_message_rejected);
+    RUN(test_lying_entry_count_rejected);
     RUN(test_malformed_entries_ignored);
     RUN(test_i083_recovery_from_stale);
     RUN(test_i083_equal_seq_adoption_while_stale);

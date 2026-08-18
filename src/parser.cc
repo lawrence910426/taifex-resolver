@@ -240,7 +240,10 @@ void TaifexParser::process_datagram(const uint8_t* data, size_t len) {
 }
 
 void TaifexParser::process_raw_data(const uint8_t* data, size_t length) {
-    if (length < 20 || data[0] != ESC_CODE) return;
+    // ESC(1) + header(18) + body + checksum(1) + terminal(2). The legal
+    // zero-body message (I001 heartbeat) is exactly 22 bytes; nothing
+    // shorter can carry a full header.
+    if (length < 22 || data[0] != ESC_CODE) return;
     if (!verify_checksum(data, length)) {
         std::cerr << "[DEBUG] Checksum failed" << std::endl;
         return;
@@ -255,26 +258,42 @@ void TaifexParser::process_raw_data(const uint8_t* data, size_t length) {
     header.version_no = (uint8_t)bcd_to_uint(data + 16, 1);
     header.body_len = (uint16_t)bcd_to_uint(data + 17, 2);
 
+    // The framed length must agree with the header's own BODY-LENGTH. The
+    // XOR checksum only covers the bytes that are present — it says nothing
+    // about bytes a decoder would read PAST the end of a truncated message.
+    // Rejected before on_header: a mis-framed CHANNEL-SEQ must not fake a
+    // channel gap.
+    if (length != 22u + header.body_len) {
+        std::cerr << "[WARN] BODY-LENGTH " << header.body_len
+                  << " disagrees with framed length " << length
+                  << " — message dropped" << std::endl;
+        return;
+    }
+
     // The order book manager tracks CHANNEL-SEQ over every message on the
     // channel (including I001 heartbeats, I002 sequence resets and kinds this
     // parser does not decode), so it is fed each valid header up front.
     if (book_mgr_) book_mgr_->on_header(header);
 
     switch (header.message_kind) {
-        case 'D': handle_i024(data, header); break;
+        case 'D': handle_i024(data, length, header); break;
         case 'E': handle_i025(data, length, header); break;
-        case 'A': handle_i081(data, header); break;
-        case 'B': handle_i083(data, header); break;
-        case 'C': handle_i084(data, header); break;
+        case 'A': handle_i081(data, length, header); break;
+        case 'B': handle_i083(data, length, header); break;
+        case 'C': handle_i084(data, length, header); break;
     }
 }
 
 // --- Handler: I024 (Trade) ---
 
-bool TaifexParser::handle_i024(const uint8_t* data, const Header& header) {
+bool TaifexParser::handle_i024(const uint8_t* data, size_t length, const Header& header) {
+    const size_t end = length - 3;  // checksum + terminal
     I024_Packet pkt;
     pkt.header = header;
-    size_t offset = 19; 
+    size_t offset = 19;
+    // Fixed part: PROD-ID(20) SEQ(5) FLAG(1) MATCH-TIME(6) SIGN(1) PX(5)
+    // QTY(4) DISPLAY-ITEM(1) = 43 bytes.
+    if (offset + 43 > end) return false; 
 
     // 1. Prod ID
     memcpy(pkt.prod_id, data + offset, 20);
@@ -303,8 +322,10 @@ bool TaifexParser::handle_i024(const uint8_t* data, const Header& header) {
     pkt.display_item = data[offset++];
     int occurs = pkt.display_item & 0x7F; 
 
-    // 7. Repeated Match Data
+    // 7. Repeated Match Data (8 bytes each; `occurs` comes from the packet
+    // and can lie even when BODY-LENGTH agrees)
     for (int i = 0; i < occurs; ++i) {
+        if (offset + 8 > end) return false;
         MatchData md;
         md.price_sign = data[offset++];
         md.price = bcd_to_uint(data + offset, 5);
@@ -314,7 +335,8 @@ bool TaifexParser::handle_i024(const uint8_t* data, const Header& header) {
         pkt.consecutive_matches.push_back(md);
     }
 
-    // 8. Cumulative Data 
+    // 8. Cumulative Data
+    if (offset + 12 > end) return false;
     pkt.total_qty = (uint32_t)bcd_to_uint(data + offset, 4); offset += 4;
     pkt.buy_cnt = (uint32_t)bcd_to_uint(data + offset, 4);   offset += 4;
     pkt.sell_cnt = (uint32_t)bcd_to_uint(data + offset, 4);  offset += 4;
@@ -362,10 +384,13 @@ bool TaifexParser::handle_i025(const uint8_t* data, size_t length, const Header&
 
 // --- Handler: I081 (Incremental) ---
 
-bool TaifexParser::handle_i081(const uint8_t* data, const Header& header) {
+bool TaifexParser::handle_i081(const uint8_t* data, size_t length, const Header& header) {
+    const size_t end = length - 3;  // checksum + terminal
     I081_Packet pkt;
     pkt.header = header;
     size_t offset = 19;
+    // Fixed part: PROD-ID(20) SEQ(5) NO-MD-ENTRIES(1) = 26 bytes.
+    if (offset + 26 > end) return false;
 
     memcpy(pkt.prod_id, data + offset, 20);
     pkt.prod_id[20] = '\0';
@@ -378,6 +403,7 @@ bool TaifexParser::handle_i081(const uint8_t* data, const Header& header) {
     offset += 1;
 
     for (int i = 0; i < pkt.no_md_entries; ++i) {
+        if (offset + 13 > end) return false;  // 13 bytes per MD entry
         MDEntry entry;
         entry.update_action = data[offset++];
         entry.entry_type = data[offset++];
@@ -398,10 +424,13 @@ bool TaifexParser::handle_i081(const uint8_t* data, const Header& header) {
 
 // --- Handler: I083 (Snapshot) ---
 
-bool TaifexParser::handle_i083(const uint8_t* data, const Header& header) {
+bool TaifexParser::handle_i083(const uint8_t* data, size_t length, const Header& header) {
+    const size_t end = length - 3;  // checksum + terminal
     I083_Packet pkt;
     pkt.header = header;
     size_t offset = 19;
+    // Fixed part: PROD-ID(20) SEQ(5) CALC-FLAG(1) NO-MD-ENTRIES(1) = 27 bytes.
+    if (offset + 27 > end) return false;
 
     memcpy(pkt.prod_id, data + offset, 20);
     pkt.prod_id[20] = '\0';
@@ -416,6 +445,7 @@ bool TaifexParser::handle_i083(const uint8_t* data, const Header& header) {
     offset += 1;
 
     for (int i = 0; i < pkt.no_md_entries; ++i) {
+        if (offset + 12 > end) return false;  // 12 bytes per snapshot entry
         SnapshotEntry entry;
         entry.entry_type = data[offset++];
         entry.price_sign = data[offset++];
@@ -437,27 +467,33 @@ bool TaifexParser::handle_i083(const uint8_t* data, const Header& header) {
 // MESSAGE-TYPE at offset 19 selects the body. We resolve 'A'/'O'/'Z'; 'S'/'P'
 // (statistics / product status) are delivered header+type only (out of scope).
 
-bool TaifexParser::handle_i084(const uint8_t* data, const Header& header) {
+bool TaifexParser::handle_i084(const uint8_t* data, size_t length, const Header& header) {
+    const size_t end = length - 3;  // checksum + terminal
     I084_Packet pkt;
     pkt.header = header;
     pkt.last_seq = 0;
     pkt.no_entries = 0;
     size_t offset = 19;
 
+    if (offset + 1 > end) return false;
     pkt.message_type = data[offset++];
 
     switch (pkt.message_type) {
         case 'A':   // Refresh Begin
         case 'Z':   // Refresh Complete
+            if (offset + 5 > end) return false;  // LAST-SEQ
             pkt.last_seq = (uint32_t)bcd_to_uint(data + offset, 5);
             offset += 5;
             break;
 
         case 'O': { // Order Data: NO-ENTRIES products, each a small order book
+            if (offset + 1 > end) return false;
             pkt.no_entries = (uint8_t)bcd_to_uint(data + offset, 1);
             offset += 1;
 
             for (int p = 0; p < pkt.no_entries; ++p) {
+                // Per product: PROD-ID(20) LAST-PROD-MSG-SEQ(5) COUNT(1).
+                if (offset + 26 > end) return false;
                 I084Product prod;
                 memcpy(prod.prod_id, data + offset, 20);
                 prod.prod_id[20] = '\0';
@@ -470,6 +506,7 @@ bool TaifexParser::handle_i084(const uint8_t* data, const Header& header) {
                 offset += 1;
 
                 for (int i = 0; i < prod.no_md_entries; ++i) {
+                    if (offset + 12 > end) return false;  // 12 B per entry
                     SnapshotEntry entry;
                     entry.entry_type = data[offset++];
                     entry.price_sign = data[offset++];
