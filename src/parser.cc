@@ -49,12 +49,16 @@ bool TaifexParser::verify_checksum(const uint8_t* data, size_t len) {
 void TaifexParser::start_loop(int port, I024Callback cb24, I025Callback cb25, I081Callback cb81, I083Callback cb83, I084Callback cb84) {
     if (running) return;
     running = true;
+    set_callbacks(cb24, cb25, cb81, cb83, cb84);
+    recv_thread = std::thread(&TaifexParser::receive_loop, this, port);
+}
+
+void TaifexParser::set_callbacks(I024Callback cb24, I025Callback cb25, I081Callback cb81, I083Callback cb83, I084Callback cb84) {
     on_i024 = cb24;
     on_i025 = cb25;
     on_i081 = cb81;
     on_i083 = cb83;
     on_i084 = cb84;
-    recv_thread = std::thread(&TaifexParser::receive_loop, this, port);
 }
 
 void TaifexParser::set_order_book_manager(OrderBookManager* mgr) {
@@ -127,18 +131,23 @@ void TaifexParser::receive_loop(int port) {
         socklen_t addr_len = sizeof(client_addr);
         ssize_t len = recvfrom(sockfd, buffer, sizeof(buffer), 0, (struct sockaddr*)&client_addr, &addr_len);
         if (len > 0) {
-            size_t start_pos = 0;
-            for (size_t i = 0; i < (size_t)len - 1; i++) {
-                if (buffer[i] == 0x0D && buffer[i + 1] == 0x0A) {
-                    process_raw_data(buffer + start_pos, i + 2 - start_pos);
-                    start_pos = i + 2;
-                }
-            }
+            process_datagram(buffer, static_cast<size_t>(len));
         } else if (len < 0) {
             if (errno != EINTR && errno != EBADF) {
                 std::cerr << "[ERROR] recvfrom error: " << strerror(errno) << std::endl;
             }
             break;
+        }
+    }
+}
+
+void TaifexParser::process_datagram(const uint8_t* data, size_t len) {
+    if (len < 2) return;
+    size_t start_pos = 0;
+    for (size_t i = 0; i < len - 1; i++) {
+        if (data[i] == 0x0D && data[i + 1] == 0x0A) {
+            process_raw_data(data + start_pos, i + 2 - start_pos);
+            start_pos = i + 2;
         }
     }
 }

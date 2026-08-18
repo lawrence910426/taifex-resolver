@@ -275,6 +275,36 @@ PYBIND11_MODULE(taifex_udp_resolver, m) {
         .def("end_loop", &TaifexParser::end_loop,
              py::call_guard<py::gil_scoped_release>(),
              "Stop the parsing loop")
+        .def("set_callbacks",
+             [](TaifexParser &self,
+                std::function<void(const I024_Packet &)> cb_i024,
+                std::function<void(const I025_Packet &)> cb_i025,
+                std::function<void(const I081_Packet &)> cb_i081,
+                std::function<void(const I083_Packet &)> cb_i083,
+                std::function<void(const I084_Packet &)> cb_i084) {
+                 self.set_callbacks(cb_i024, cb_i025, cb_i081, cb_i083,
+                                    cb_i084);
+             },
+             py::arg("cb_i024"),
+             py::arg("cb_i025"),
+             py::arg("cb_i081"),
+             py::arg("cb_i083"),
+             py::arg("cb_i084"),
+             "Install the five per-type callbacks without starting the\n"
+             "socket loop (file mode). Pass None for any type you do not\n"
+             "need.")
+        .def("process_datagram",
+             [](TaifexParser &self, py::bytes datagram) {
+                 char *buf;
+                 py::ssize_t len;
+                 if (PYBIND11_BYTES_AS_STRING_AND_SIZE(datagram.ptr(), &buf, &len) != 0)
+                     throw py::error_already_set();
+                 self.process_datagram(reinterpret_cast<const uint8_t*>(buf), static_cast<size_t>(len));
+             },
+             py::arg("datagram"),
+             "Split one UDP datagram payload on 0x0D 0x0A and feed each\n"
+             "message to the parser; callbacks (and the order-book manager,\n"
+             "if attached) fire inline on the calling thread.")
         .def("set_multicast", &TaifexParser::set_multicast,
              py::arg("group"), py::arg("iface_ip"),
              "Configure the IPv4 multicast group + local interface IP to join.")

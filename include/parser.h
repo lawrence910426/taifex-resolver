@@ -150,6 +150,15 @@ public:
     void end_loop() ;
     void set_multicast(const std::string& group, const std::string& iface_ip);
 
+    // Install/replace the five per-type callbacks without starting the
+    // socket loop (file mode). start_loop reuses this.
+    void set_callbacks(I024Callback cb024, I025Callback cb025, I081Callback cb81, I083Callback cb83, I084Callback cb84);
+
+    // Split one UDP datagram payload on the 0x0D 0x0A terminator and feed
+    // each message to the parser. Shared by receive_loop (live) and
+    // file-mode drivers.
+    void process_datagram(const uint8_t* data, size_t len);
+
     // Forward decoded messages to an OrderBookManager (wrapped handle_ mode).
     // The manager is fed BEFORE the raw on_ callbacks fire, and additionally
     // receives every checksum-valid header (needed for I001/I002/CHANNEL-SEQ
