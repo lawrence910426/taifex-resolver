@@ -183,20 +183,25 @@ bool TaifexParser::setup_socket(int port) {
         mreq.imr_multiaddr.s_addr = group_addr;
         mreq.imr_interface.s_addr = iface_addr;  // receive-side iface selector
 
-        std::cerr << "[INFO] Attempting to join multicast group " << multicast_group
+        std::cerr << "[INFO] joining multicast group " << multicast_group
                   << " on interface " << interface_ip << std::endl;
 
+        // Hard error: the socket is bound to the group and IP_MULTICAST_ALL
+        // is off, so without a membership it receives NOTHING — and a
+        // silently idle socket is this system's worst failure mode. Expect
+        // EADDRNOTAVAIL (interface not local), ENODEV, or ENOBUFS
+        // (net.ipv4.igmp_max_memberships, default 20).
         if (setsockopt(sockfd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
-            std::cerr << "[WARN] IP_ADD_MEMBERSHIP failed: " << strerror(errno)
-                      << " — continuing without IGMP join" << std::endl;
+            std::cerr << "[ERROR] IP_ADD_MEMBERSHIP " << multicast_group
+                      << " on " << interface_ip << " failed: "
+                      << strerror(errno) << std::endl;
+            close(sockfd);
+            sockfd = -1;
+            return false;
         }
-
-        struct in_addr local_interface{};
-        local_interface.s_addr = iface_addr;
-        if (setsockopt(sockfd, IPPROTO_IP, IP_MULTICAST_IF, &local_interface, sizeof(local_interface)) < 0) {
-            std::cerr << "[WARN] IP_MULTICAST_IF failed: " << strerror(errno)
-                      << " — continuing" << std::endl;
-        }
+        // IP_MULTICAST_IF is deliberately NOT set: it selects the egress
+        // interface for OUTBOUND multicast, and this socket only ever
+        // receives. Receive-side interface selection is mreq.imr_interface.
     }
     return true;
 }
