@@ -14,12 +14,12 @@ find_package(Threads REQUIRED)
 # 2. Build Target: Parser Object Library
 # Using OBJECT library to avoid redundant compilation for static/shared targets
 add_library(parser_obj OBJECT src/parser.cc src/order_book.cc)
-target_include_directories(parser_obj PRIVATE include)
+target_include_directories(parser_obj PRIVATE include constants)
 set_target_properties(parser_obj PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # 3. Build Target: Static Library (libparser_static.a)
 add_library(parser_static STATIC $<TARGET_OBJECTS:parser_obj>)
-target_include_directories(parser_static PUBLIC include)
+target_include_directories(parser_static PUBLIC include constants)
 set_target_properties(parser_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # 4. Build Target: C++ Interface Executable
@@ -29,7 +29,7 @@ add_executable(taifex_resolver_cpp
 )
 
 # Include directories
-target_include_directories(taifex_resolver_cpp PRIVATE include)
+target_include_directories(taifex_resolver_cpp PRIVATE include constants)
 
 # Link Static Library and Threading Library
 target_link_libraries(taifex_resolver_cpp 
@@ -62,7 +62,7 @@ option(TAIFEX_BUILD_TESTS "Build C++ unit tests" ON)
 if(TAIFEX_BUILD_TESTS)
     enable_testing()
     add_executable(order_book_test test/order_book_test.cc)
-    target_include_directories(order_book_test PRIVATE include)
+    target_include_directories(order_book_test PRIVATE include constants)
     target_link_libraries(order_book_test PRIVATE parser_static Threads::Threads)
     add_test(NAME order_book_test COMMAND order_book_test)
 endif()
@@ -82,7 +82,7 @@ if(TAIFEX_BUILD_PYTHON)
     endif()
 
     pybind11_add_module(taifex_udp_resolver src/pybind.cpp)
-    target_include_directories(taifex_udp_resolver PRIVATE include)
+    target_include_directories(taifex_udp_resolver PRIVATE include constants)
     target_link_libraries(taifex_udp_resolver PRIVATE parser_static Threads::Threads)
 
     if(DEFINED VERSION_INFO)
