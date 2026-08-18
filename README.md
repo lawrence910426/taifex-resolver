@@ -86,7 +86,7 @@ Refer to our [example](./example/taifex_resolver_interface.cc).
 
 `OrderBookManager` (see [include/order_book.h](./include/order_book.h)) maintains the current 5-level order book per instrument — regular and derived (implied) sides — built from **I083** snapshots plus **I081** increments, and recovered through the **I084** snapshot carousel. Register a callback per instrument (or a wildcard) and it fires with a self-consistent copy of the book on every change, including stale-flag transitions.
 
-Because realtime data (I024/I025/I081/I083, port 14000/4000) and the I084 carousel (port 14700/4700) ride **different multicast channels**, a live deployment uses two `TaifexParser` instances feeding one shared manager:
+Because realtime data (I024/I025/I081/I083, port 14000/4000) and the I084 carousel (port 14700/4700) ride **different multicast channels**, a live deployment uses two `TaifexParser` instances feeding one shared manager — and **each** instance must be given its own multicast group (the example's `-mode` does this for both at once). A parser without a group binds the wildcard address, which is the local-replay form, not a live one:
 
 ```
 realtime parser (14000)  ─┐
@@ -103,10 +103,13 @@ TAIFEX numbers messages two ways: `CHANNEL-SEQ` (per channel, all message kinds)
 | Product serial contiguous (`seq == last+1`) | Clears channel-gap *suspicion* only (proves the loss didn't concern this product). A chain already broken by a product-serial gap stays stale until a snapshot re-bases it |
 | Product serial gap (`seq > last+1`) | Book **stale**; increments still applied best-effort, callbacks keep firing with `is_stale=true` |
 | `CHANNEL-SEQ` gap on a realtime channel (incl. gaps revealed by I001 heartbeats) | All books **stale** (suspect) until each product proves contiguity or re-bases from a snapshot |
-| Normal I083, or an I084 `'O'` product entry, with `seq >= last` | Book adopted wholesale, stale cleared |
+| Normal I083, or an I084 `'O'` product entry, with `seq >= last` | Book adopted wholesale, stale cleared. An `'O'` whose serial **equals** a trusted book's is a no-op carousel cycle: skipped, no delivery |
 | Trial I083 (`calculated_flag='1'`) | Serial tracked (it consumes one), content ignored |
 | Duplicate/retransmit (`seq <= last`) | Dropped |
-| I002 sequence reset | All books and trackers cleared (per spec) |
+| I002 sequence reset on a **realtime** channel | Books and per-product serials cleared (per spec, which scopes the wipe to 即時行情 groups); that channel's own tracker resets; snapshot adoption is **quarantined** until the next Refresh Begin, so an `'O'` block built before the reset cannot re-base a cleared product at its pre-reset serial |
+| I002 on a channel known to carry snapshots | Only that channel's tracker resets; books survive |
+
+Timestamps on the delivered book: `info_time` is when the **content** last changed (header time of the last realtime message applied; an I084 carousel adoption does not touch it — the `'O'` block carries no time of its own and the broadcast instant says nothing about the content's age). `snapshot_time` is the broadcast time of the snapshot (I083 or I084 `'O'`) that last re-based the book.
 
 **No-buffering caveat:** increments received between an I084 snapshot's generation and its adoption are discarded by the wholesale adoption. If the product changed inside that window, the next increment shows a gap and the book goes stale again until the next carousel cycle (or an I083). Quiet products converge in one cycle; very active ones may take a few.
 
@@ -156,30 +159,21 @@ Notes:
 
 ## Testing
 
-Navigate to the root directory of this repository and execute the following commands:
+The interactive parser-vs-mocker environment lives in `test/run_testing.sh` (requires Docker and tmux):
 
 ```
-cd test
-bash bash.sh
+bash test/run_testing.sh
 ```
 
-This script initiates the test suite using Docker to ensure a clean environment for network simulation.
-
-### Test Setup
-
-The test environment utilizes two main components:
-1. Parser Container: Runs the resolver to decode incoming TAIFEX UDP packets.
-2. Mocker (TAIFEX_mocker.py): Simulates the exchange by replaying packets towards the parser.
-
-You should go into the Docker container to run the test and observe the real-time decoding.
+It builds the project, builds a Docker image, and opens a tmux session with the resolver in one pane and `TAIFEX_mocker.py` in the other.
 
 ### Run the C++ example
 
-Run the C++ example in standard listening mode. In a separate terminal, you can follow the logs: tail -f build/logger/taifex_parser.log.
+Run the C++ example in local-replay mode (no `-mode`, so the socket accepts loopback unicast). It logs to `logger/taifex_parser.log` relative to the current working directory — run it from `build/` and the log is `build/logger/taifex_parser.log`.
 
 ```
 cd build
-./taifex_resolver_cpp -port 14000 -snapshot-port 14700
+./taifex_resolver_cpp
 ```
 
 Book transitions are also echoed to stdout as `[BOOK][FRESH]` / `[BOOK][STALE]` lines.
@@ -190,7 +184,7 @@ Book transitions are also echoed to stdout as `[BOOK][FRESH]` / `[BOOK][STALE]` 
 
 ```
 # terminal 1
-./build/taifex_resolver_cpp -port 14000 -snapshot-port 14700
+./build/taifex_resolver_cpp
 # terminal 2
 python3 test/TAIFEX_mocker.py --scenario gap
 ```
@@ -202,28 +196,41 @@ cd build && cmake .. && make -j$(nproc)
 ./order_book_test        # or: ctest --output-on-failure
 ```
 
-### Multicast
+### Multicast (live mode)
 
-When both `-multicast` and `-iface` flags are provided, the parser will automatically join the specified multicast group on the given network interface. No additional setup is required — the IGMP join is handled internally.
+Live listening is selected with `-mode`; every endpoint comes from the manual's channel table compiled into [constants/taifex_channels.h](./constants/taifex_channels.h) — no address or port is ever typed. A mode is a matched realtime + snapshot channel pair, so day and night endpoints cannot be mixed:
+
+| `-mode` | realtime | snapshot |
+|---|---|---|
+| `FUTURES_DAY` | `225.0.140.140:14000` | `225.0.140.147:14700` |
+| `FUTURES_NIGHT` | `225.10.140.140:14000` | `225.10.140.147:14700` |
+| `OPTIONS_DAY` | `225.0.40.40:4000` | `225.0.40.47:4700` |
+| `OPTIONS_NIGHT` | `225.10.40.40:4000` | `225.10.40.47:4700` |
 
 ```
-./taifex_resolver_cpp -port 14000 -multicast <multicast_group_ip> -iface <interface_ip>
+./taifex_resolver_cpp -mode FUTURES_NIGHT -iface <feed-nic-local-ip>
 ```
 
-For example, to listen on interface `127.0.0.1` for multicast group `225.0.140.140`:
+`-iface` is required with `-mode` and must be a local address on the NIC that receives the feed (it selects the interface for the multicast join).
 
-```
-./taifex_resolver_cpp -port 14000 -multicast 225.0.140.140 -iface 127.0.0.1 -port 14000
-```
+Live-socket semantics, deliberately strict:
+
+- **The socket is bound to the group address**, not the wildcard. TAIFEX day and night sessions share every port and differ only by group (`225.0.x` vs `225.10.x`) — with a wildcard bind the other session's feed leaks in and poisons the order books (identical CHANNEL-IDs and PROD-IDs, different serial spaces). One parser == one channel.
+- `IP_MULTICAST_ALL` is cleared, so this socket's **own** join is the only thing that admits traffic; a co-tenant process's membership cannot feed it by accident.
+- A malformed group, a missing/non-local `-iface`, or a **failed join is fatal** — `start_loop` returns `false` (Python: `False`) and the receive thread is not started. A silently idle socket would look healthy while producing nothing.
+- Two parsers on the same port with different groups do not conflict and cannot cross-contaminate. `SO_REUSEADDR` is set, so several processes may consume the same group+port; do **not** add `SO_REUSEPORT` (useless for multicast fan-out, and it load-balances any unicast on the port).
+- In Docker, a live consumer needs `--network host` (or macvlan). Under bridge networking the join succeeds inside the container's namespace and the socket then receives nothing — the fatal-join check cannot catch that.
 
 ### Offline Data Replay
 
-For development and logic verification without a live feed, you can use the utility in the helpers/ directory to simulate traffic from pcap sources.
+For development and logic verification without a live feed, run the parser **without `-mode`** — the socket then binds the wildcard address and accepts local unicast — and replay traffic at it:
 
 ```
-cd helpers
-python3 send_pcap_without_multicast.py
+./build/taifex_resolver_cpp            # no -mode: local unicast replay form
+python3 test/TAIFEX_mocker.py          # sends to 127.0.0.1:14000 / :14700
 ```
+
+(With `-mode` the socket is bound to the multicast group and will not see loopback unicast traffic.) The helpers/ directory also has `send_pcap_without_multicast.py`, which replays a pcap's payloads to `127.0.0.1:14000`.
 
 ---
 
@@ -255,5 +262,7 @@ snap.start_loop(14700, None, None, None, None, None)
 
 Python-specific notes:
 
+- `start_loop` returns `False` when socket setup failed (bad group, bind error, failed join); the receive thread is not started in that case. `set_multicast` must be called **before** `start_loop`.
+- `taifex_udp_resolver.MODES` lists the eight single-channel mode names and `taifex_udp_resolver.endpoint(mode)` returns that channel's `(group, port)` from the manual's table.
 - Callbacks run on the receive threads; pybind acquires the GIL automatically. Keep them fast.
 - The transient-reference delivery contract does not affect Python: pybind materialises a fresh `OrderBook` object at the boundary, so the object handed to your callback is yours to keep.

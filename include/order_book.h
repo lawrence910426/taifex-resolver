@@ -34,7 +34,17 @@ struct OrderBook {
     uint32_t last_prod_msg_seq = 0;  // PROD-MSG-SEQ of last message applied/adopted
     bool is_stale = true;            // true = increment chain broken or unproven
     bool has_snapshot = false;       // ever adopted an I083 / I084-'O' base
-    char info_time[16] = {0};        // header INFORMATION-TIME of driving message
+    // When the CONTENT last changed: the header INFORMATION-TIME of the last
+    // realtime message (I081) or realtime snapshot (I083) applied. An I084
+    // carousel adoption does NOT touch it — the carousel re-broadcasts every
+    // book on a fixed cycle and its 'O' block carries no time of its own, so
+    // the broadcast instant says nothing about when the content changed
+    // (measured median gap: ~15 minutes). Empty until the first realtime
+    // message for the product.
+    char info_time[16] = {0};
+    // Broadcast INFORMATION-TIME of the snapshot message (I083 or I084 'O')
+    // that last re-based this book; empty if never re-based from a snapshot.
+    char snapshot_time[16] = {0};
     std::array<OrderBookLevel, TAIFEX_BOOK_DEPTH> bids{};
     std::array<OrderBookLevel, TAIFEX_BOOK_DEPTH> asks{};
     std::array<OrderBookLevel, TAIFEX_BOOK_DEPTH> derived_bids{};
@@ -57,8 +67,12 @@ struct OrderBook {
 //     flag (proof that the loss did not concern it).
 //   - A snapshot (normal I083, or each I084 'O' product entry) with
 //     seq >= last is adopted wholesale and clears both flags.
-//   - I002 sequence reset (message_kind '2') clears all books and trackers,
-//     as mandated by the TAIFEX spec.
+//   - I002 sequence reset (message_kind '2') on a realtime channel clears
+//     all books and per-product serials, as mandated by the TAIFEX spec. The
+//     spec scopes that wipe to 即時行情 groups, so an I002 arriving on a
+//     channel known to carry snapshots (I084) resets only that channel's own
+//     sequence tracker. A channel not yet seen carrying I084 is treated as
+//     realtime (the identity is learned from traffic).
 //
 // Delivered is_stale = !synced || suspect.
 //
@@ -142,11 +156,18 @@ private:
     // Advance per-product seq; returns true when the message is new
     // (seq > last). Handles duplicate drop and gap -> synced=false.
     bool track_seq_locked(ProductState& st, uint32_t seq);
+    // Replace the book content wholesale. content_time stamps info_time
+    // (pass nullptr to leave it — the I084 carousel case, whose broadcast
+    // time is not a content time); snapshot_time is always stamped.
     void adopt_snapshot_locked(ProductState& st, const char* prod_id,
                                uint32_t seq, const std::vector<SnapshotEntry>& entries,
-                               const char* info_time);
-    // Deliver is_stale=true for every currently-trusted book, then clear all
-    // books and trackers (I002 semantics).
+                               const char* content_time, const char* snapshot_time);
+    // Deliver is_stale=true for every currently-trusted book, then clear
+    // the books, per-product serials and the snapshot quarantine. Channel
+    // trackers are NOT touched: an I002 resets only its own group's serial,
+    // and reset() layers the full tracker wipe on top.
+    void collect_book_wipe_locked(std::vector<Delivery>& out);
+    // Full I002-equivalent reset (books + every channel tracker); reset().
     void collect_reset_locked(std::vector<Delivery>& out);
     // Append one Delivery for the product: a single stamped snapshot copy of
     // `live_book` plus the callbacks registered for it (per-product first,
@@ -159,6 +180,16 @@ private:
     static void fire(std::vector<Delivery>& deliveries);
 
     mutable std::mutex mtx_;
+    // Set by a reset (I002 or reset()): an I084 'O' block that was built
+    // BEFORE the reset can still be in flight (the carousel round spans
+    // seconds, the socket buffer holds more), and adopting it would re-base
+    // a freshly cleared product at the pre-reset serial — after which every
+    // post-reset message is dropped as a duplicate, forever, while the book
+    // reports fresh. Per the manual's recovery rule (discard snapshot data,
+    // wait for the next Refresh Begin), 'O' blocks are ignored while this is
+    // set; the next I084 'A' clears it, since everything after that Begin
+    // was assembled by the exchange after its own reset.
+    bool snapshot_quarantine_ = false;
     std::unordered_map<std::string, ProductState> products_;   // key: trimmed prod_id
     std::unordered_map<uint16_t, ChannelState> channels_;      // key: channel_id
     std::unordered_map<std::string, std::vector<CallbackPtr>> callbacks_;

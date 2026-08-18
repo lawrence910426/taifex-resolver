@@ -103,7 +103,8 @@ bool OrderBookManager::track_seq_locked(ProductState& st, uint32_t seq) {
 void OrderBookManager::adopt_snapshot_locked(ProductState& st, const char* prod_id,
                                              uint32_t seq,
                                              const std::vector<SnapshotEntry>& entries,
-                                             const char* info_time) {
+                                             const char* content_time,
+                                             const char* snapshot_time) {
     OrderBook& book = st.book;
     book.bids.fill(OrderBookLevel{});
     book.asks.fill(OrderBookLevel{});
@@ -118,14 +119,16 @@ void OrderBookManager::adopt_snapshot_locked(ProductState& st, const char* prod_
     }
     std::memcpy(book.prod_id, prod_id, 20);
     book.prod_id[20] = '\0';
-    std::memcpy(book.info_time, info_time, sizeof(book.info_time));
+    if (content_time)
+        std::memcpy(book.info_time, content_time, sizeof(book.info_time));
+    std::memcpy(book.snapshot_time, snapshot_time, sizeof(book.snapshot_time));
     book.last_prod_msg_seq = seq;
     book.has_snapshot = true;
     st.synced = true;
     st.suspect = false;
 }
 
-void OrderBookManager::collect_reset_locked(std::vector<Delivery>& out) {
+void OrderBookManager::collect_book_wipe_locked(std::vector<Delivery>& out) {
     // The reset invalidates every book; tell subscribers whose last delivered
     // snapshot claimed to be trusted (mirrors the channel-gap stale-flip
     // sweep).
@@ -135,6 +138,14 @@ void OrderBookManager::collect_reset_locked(std::vector<Delivery>& out) {
         collect_delivery_locked(kv.first, st.book, /*is_stale=*/true, out);
     }
     products_.clear();
+    // Quarantine the snapshot carousel until its next Refresh Begin: an 'O'
+    // block assembled before this reset must not re-base a cleared product
+    // at its pre-reset serial (see the field comment in order_book.h).
+    snapshot_quarantine_ = true;
+}
+
+void OrderBookManager::collect_reset_locked(std::vector<Delivery>& out) {
+    collect_book_wipe_locked(out);
     channels_.clear();
 }
 
@@ -169,10 +180,18 @@ void OrderBookManager::on_header(const Header& header) {
         std::lock_guard<std::mutex> lock(mtx_);
 
         if (header.message_kind == '2') {
-            // I002 sequence reset: the spec mandates clearing the order books
-            // and every sequence tracker. Subscribers are told their book is
-            // no longer trusted before the state disappears.
-            collect_reset_locked(deliveries);
+            // I002 sequence reset. The spec scopes the book wipe to realtime
+            // groups (「若該 CHANNEL 屬即時行情群組則須清空各商品委託簿…」)
+            // and to resetting THAT group's serial — so a reset on a channel
+            // known to carry snapshots touches only its own tracker, and a
+            // realtime reset leaves other channels' trackers alone.
+            auto it = channels_.find(header.channel_id);
+            if (it != channels_.end() && it->second.is_snapshot_channel) {
+                it->second.last_seq = 0;
+            } else {
+                collect_book_wipe_locked(deliveries);
+                if (it != channels_.end()) it->second.last_seq = 0;
+            }
         } else {
             do {
                 auto it = channels_.find(header.channel_id);
@@ -289,8 +308,10 @@ void OrderBookManager::on_i083(const I083_Packet& pkt) {
             if (st.book.last_prod_msg_seq != 0 &&
                 pkt.prod_msg_seq < st.book.last_prod_msg_seq)
                 return;  // older than the live book: ignore
+            // An I083 rides the realtime channel: its broadcast time IS the
+            // content time.
             adopt_snapshot_locked(st, pkt.prod_id, pkt.prod_msg_seq, pkt.entries,
-                                  pkt.header.info_time);
+                                  pkt.header.info_time, pkt.header.info_time);
             collect_delivery_locked(trim_prod_id(pkt.prod_id), st.book,
                                     /*is_stale=*/false, deliveries);
         }
@@ -299,17 +320,37 @@ void OrderBookManager::on_i083(const I083_Packet& pkt) {
 }
 
 void OrderBookManager::on_i084(const I084_Packet& pkt) {
-    if (pkt.message_type != 'O') return;  // 'A'/'Z'/'S'/'P' carry no book data
+    if (pkt.message_type == 'A') {
+        // Refresh Begin: this round was assembled after any reset we have
+        // processed, so it lifts the post-reset quarantine.
+        std::lock_guard<std::mutex> lock(mtx_);
+        snapshot_quarantine_ = false;
+        return;
+    }
+    if (pkt.message_type != 'O') return;  // 'Z'/'S'/'P' carry no book data
     for (const I084Product& prod : pkt.products) {
         std::vector<Delivery> deliveries;
         {
             std::lock_guard<std::mutex> lock(mtx_);
+            if (snapshot_quarantine_) return;  // pre-reset round in flight
             ProductState& st = get_or_create_locked(prod.prod_id);
             if (st.book.last_prod_msg_seq != 0 &&
                 prod.last_prod_msg_seq < st.book.last_prod_msg_seq)
                 continue;  // snapshot older than the live book: ignore
+            // No-op cycle: the carousel re-broadcasts every product on a
+            // fixed cadence, so an idle product re-appears with an unchanged
+            // serial every cycle. Equal serial on a trusted book means equal
+            // content (any book change consumes a PROD-MSG-SEQ), so there is
+            // nothing to adopt and nothing to tell subscribers. A book whose
+            // trust is broken or suspect still adopts: that changes state.
+            if (prod.last_prod_msg_seq == st.book.last_prod_msg_seq &&
+                st.book.has_snapshot && st.synced && !st.suspect)
+                continue;
+            // Carousel: the header time is the BROADCAST instant, not the
+            // content time — the 'O' block has no time field and its content
+            // is as-of LAST-PROD-MSG-SEQ. info_time stays untouched.
             adopt_snapshot_locked(st, prod.prod_id, prod.last_prod_msg_seq,
-                                  prod.entries, pkt.header.info_time);
+                                  prod.entries, nullptr, pkt.header.info_time);
             collect_delivery_locked(trim_prod_id(prod.prod_id), st.book,
                                     /*is_stale=*/false, deliveries);
         }

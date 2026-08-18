@@ -6,6 +6,7 @@
 #include <vector>
 #include <sstream>
 #include "parser.h"
+#include "taifex_channels.h"
 #include "order_book.h"
 #include "logger.h"
 
@@ -292,26 +293,51 @@ int main(int argc, char* argv[]) {
     // PROD-ID short code: symbol + month letter (A=Jan..L=Dec) + year digit.
     // TXFG6 = TXF July 2026; update as contracts roll (or pass -prod).
     std::string prod = "TXFG6";
-    std::string multicast_group;
+    // Live mode is selected with -mode; endpoints always come from the
+    // manual's channel table (constants/taifex_channels.h), never from a
+    // typed address. Without -mode the parsers bind the wildcard address —
+    // the local unicast-replay form.
+    std::string mode;
     std::string interface_ip;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
-        if (arg == "-port" && i + 1 < argc) {
-            port = std::stoi(argv[++i]);
-        } else if (arg == "-snapshot-port" && i + 1 < argc) {
-            snapshot_port = std::stoi(argv[++i]);
+        if (arg == "-mode" && i + 1 < argc) {
+            mode = argv[++i];
         } else if (arg == "-prod" && i + 1 < argc) {
             prod = argv[++i];
-        } else if (arg == "-multicast" && i + 1 < argc) {
-            multicast_group = argv[++i];
         } else if (arg == "-iface" && i + 1 < argc) {
             interface_ip = argv[++i];
         }
     }
 
-    if (!multicast_group.empty() && !interface_ip.empty()) {
-        parser.set_multicast(multicast_group, interface_ip);
+    if (!mode.empty()) {
+        namespace tc = taifex::constants;
+        tc::Session session;
+        tc::Product product;
+        if      (mode == "FUTURES_DAY")   { session = tc::Session::Day;   product = tc::Product::Futures; }
+        else if (mode == "FUTURES_NIGHT") { session = tc::Session::Night; product = tc::Product::Futures; }
+        else if (mode == "OPTIONS_DAY")   { session = tc::Session::Day;   product = tc::Product::Options; }
+        else if (mode == "OPTIONS_NIGHT") { session = tc::Session::Night; product = tc::Product::Options; }
+        else {
+            std::cerr << "[ERROR] unknown -mode '" << mode << "'. Supported: "
+                         "FUTURES_DAY, FUTURES_NIGHT, OPTIONS_DAY, OPTIONS_NIGHT"
+                      << std::endl;
+            return 1;
+        }
+        if (interface_ip.empty()) {
+            std::cerr << "[ERROR] -mode requires -iface (the feed NIC's local "
+                         "IP address, used for the multicast join)" << std::endl;
+            return 1;
+        }
+        // A mode is a matched realtime + snapshot channel pair, so day and
+        // night endpoints can never be mixed.
+        const tc::Channel* rt   = tc::find(session, product, tc::Service::Realtime);
+        const tc::Channel* snap = tc::find(session, product, tc::Service::SnapshotRefresh);
+        port          = rt->port;
+        snapshot_port = snap->port;
+        parser.set_multicast(std::string(rt->group), interface_ip);
+        snapshot_parser.set_multicast(std::string(snap->group), interface_ip);
     }
 
     // Wrapped handle_ mode: both parsers feed one shared manager, which
@@ -323,29 +349,33 @@ int main(int argc, char* argv[]) {
     snapshot_parser.set_order_book_manager(&book_mgr);
 
     // Native on_ mode keeps working alongside (raw packet callbacks).
-    parser.start_loop(
-        port,
-        on_trade_match,   // I024 Callback
-        on_day_high_low,  // I025 Callback
-        on_incremental,   // I081 Callback
-        on_snapshot,      // I083 Callback
-        nullptr           // I084 never arrives on the realtime port
-    );
-    snapshot_parser.start_loop(
-        snapshot_port,
-        nullptr,          // realtime kinds never arrive on the snapshot port...
-        nullptr,
-        nullptr,
-        nullptr,
-        on_refresh        // ...but I084 logging is kept for visibility
-    );
+    if (!parser.start_loop(
+            port,
+            on_trade_match,   // I024 Callback
+            on_day_high_low,  // I025 Callback
+            on_incremental,   // I081 Callback
+            on_snapshot,      // I083 Callback
+            nullptr)) {       // I084 never arrives on the realtime port
+        std::cerr << "[ERROR] realtime socket setup failed" << std::endl;
+        return 1;
+    }
+    if (!snapshot_parser.start_loop(
+            snapshot_port,
+            nullptr,          // realtime kinds never arrive on the snapshot port...
+            nullptr,
+            nullptr,
+            nullptr,
+            on_refresh)) {    // ...but I084 logging is kept for visibility
+        std::cerr << "[ERROR] snapshot socket setup failed" << std::endl;
+        parser.end_loop();
+        return 1;
+    }
 
     std::cout << "TAIFEX Parser Service started on port " << port
               << " (snapshot port " << snapshot_port
               << ", book for " << prod << ")" << std::endl;
-    if (!multicast_group.empty() && !interface_ip.empty()) {
-        std::cout << "Multicast: group=" << multicast_group
-                  << " iface=" << interface_ip << std::endl;
+    if (!mode.empty()) {
+        std::cout << "Mode: " << mode << " iface=" << interface_ip << std::endl;
     }
     std::cout << "Logs are being written to taifex_parser.log. Press Ctrl+C to exit." << std::endl;
 

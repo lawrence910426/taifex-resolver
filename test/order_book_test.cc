@@ -133,6 +133,17 @@ static I084_Packet make_i084_o(uint32_t last_prod_msg_seq,
                              channel_seq);
 }
 
+// I084 'A' (Refresh Begin) / 'Z' (Refresh Complete): LAST-SEQ only, no body.
+static I084_Packet make_i084_az(char type, uint32_t last_seq,
+                                uint32_t channel_seq) {
+    I084_Packet p{};
+    p.header = make_header('C', channel_seq, kSnapChannel);
+    p.message_type = type;
+    p.last_seq = last_seq;
+    p.no_entries = 0;
+    return p;
+}
+
 static I024_Packet make_i024(uint32_t seq, uint32_t channel_seq,
                              const char* prod = kProd) {
     I024_Packet p{};
@@ -422,6 +433,96 @@ static void test_i084_multi_product() {
     CHECK(mgr.product_ids().size() == 3);
 }
 
+// I084 'A' (Refresh Begin) and 'Z' (Refresh Complete) carry only LAST-SEQ —
+// a CHANNEL-SEQ of the realtime transmission group, a different number space
+// from PROD-MSG-SEQ. The manager deliberately ignores them: they must create
+// no book, fire no callback, and leave existing books untouched.
+static void test_i084_a_z_are_ignored_by_manager() {
+    OrderBookManager mgr;
+    Recorder rec;
+    mgr.register_callback_all(rec.cb());
+
+    feed(mgr, make_i084_az('A', 500, 1));
+    feed(mgr, make_i084_az('Z', 505, 3));
+    CHECK(rec.books.empty());
+    CHECK(mgr.product_ids().empty());
+
+    // With a live book present they must still change nothing.
+    feed(mgr, make_i083(10, {make_snapshot_entry('0', 10315, 2, 1)}, 1));
+    size_t deliveries = rec.books.size();
+    feed(mgr, make_i084_az('A', 900, 1));
+    feed(mgr, make_i084_az('Z', 905, 3));
+    CHECK(rec.books.size() == deliveries);
+    CHECK(mgr.get_book(kProd)->last_prod_msg_seq == 10);
+    CHECK(!mgr.get_book(kProd)->is_stale);
+}
+
+// An I084 'O' block carries no time of its own — its header time is the
+// carousel BROADCAST instant, while the content is as-of LAST-PROD-MSG-SEQ.
+// Adoption must stamp snapshot_time, never info_time; info_time keeps
+// meaning "when the content last changed".
+static void test_i084_adoption_preserves_info_time() {
+    OrderBookManager mgr;
+
+    I081_Packet inc = make_i081(1, {make_entry('0', '0', 10315, 4, 1)}, 1);
+    std::snprintf(inc.header.info_time, sizeof(inc.header.info_time),
+                  "09:00:00.000000");
+    feed(mgr, inc);
+    CHECK(std::string(mgr.get_book(kProd)->info_time) == "09:00:00.000000");
+    CHECK(std::string(mgr.get_book(kProd)->snapshot_time).empty());
+
+    // Idle product: the carousel re-broadcasts the same seq much later.
+    I084_Packet o = make_i084_o(1, {make_snapshot_entry('0', 10315, 4, 1)}, 1);
+    std::snprintf(o.header.info_time, sizeof(o.header.info_time),
+                  "11:30:00.000000");
+    feed(mgr, o);
+    auto b = mgr.get_book(kProd);
+    CHECK(std::string(b->info_time) == "09:00:00.000000");      // untouched
+    CHECK(std::string(b->snapshot_time) == "11:30:00.000000");  // broadcast
+
+    // An I083 rides the realtime channel: its time IS the content time.
+    I083_Packet snap = make_i083(2, {make_snapshot_entry('0', 10320, 1, 1)}, 2);
+    std::snprintf(snap.header.info_time, sizeof(snap.header.info_time),
+                  "11:31:00.000000");
+    feed(mgr, snap);
+    b = mgr.get_book(kProd);
+    CHECK(std::string(b->info_time) == "11:31:00.000000");
+    CHECK(std::string(b->snapshot_time) == "11:31:00.000000");
+}
+
+// The carousel re-broadcasts every product on a fixed cycle, so an idle
+// product re-appears with an unchanged serial every ~10 s. Re-adopting it
+// changes nothing — no delivery must fire for it. A suspect or broken book
+// still adopts (that changes state), and a newer serial still adopts.
+static void test_i084_noop_carousel_delivery_suppressed() {
+    OrderBookManager mgr;
+    Recorder rec;
+    mgr.register_callback(kProd, rec.cb());
+
+    feed(mgr, make_i084_o(5, {make_snapshot_entry('0', 10315, 2, 1)}, 1));
+    CHECK(rec.books.size() == 1);
+
+    // Same serial, next cycle: suppressed.
+    feed(mgr, make_i084_o(5, {make_snapshot_entry('0', 10315, 2, 1)}, 2));
+    feed(mgr, make_i084_o(5, {make_snapshot_entry('0', 10315, 2, 1)}, 3));
+    CHECK(rec.books.size() == 1);
+
+    // Newer serial: adopts and delivers.
+    feed(mgr, make_i084_o(6, {make_snapshot_entry('0', 10316, 3, 1)}, 4));
+    CHECK(rec.books.size() == 2);
+    CHECK(level_is(rec.last().bids[0], 10316, 3));
+
+    // A realtime channel gap marks the book suspect (one stale delivery);
+    // the next equal-serial 'O' is then a real state change and delivers.
+    feed(mgr, make_i024(1, 10, "MXFG6"));  // establishes the realtime channel
+    mgr.on_header(make_header('1', 50));   // heartbeat reveals missed messages
+    CHECK(rec.books.size() == 3);
+    CHECK(rec.last().is_stale);
+    feed(mgr, make_i084_o(6, {make_snapshot_entry('0', 10316, 3, 1)}, 5));
+    CHECK(rec.books.size() == 4);
+    CHECK(!rec.last().is_stale);
+}
+
 // Corrupt/hostile MD entries (price_level 0 or >5, unknown entry_type or
 // update_action) must be skipped without touching the book or crashing.
 static void test_malformed_entries_ignored() {
@@ -677,6 +778,80 @@ static void test_i002_reset_clears_everything() {
     CHECK(!rec.last().is_stale);
 }
 
+// An I084 'O' block built BEFORE a reset can still arrive after it: a
+// carousel round spans seconds and the socket buffer holds more. The reset
+// restarts every PROD-MSG-SEQ, so that stale block must not re-base the
+// cleared product at its pre-reset serial — that would silently drop the
+// whole restarted session while reporting fresh. It is quarantined until
+// the next Refresh Begin.
+static void test_reset_then_inflight_i084_is_quarantined() {
+    OrderBookManager mgr;
+    Recorder rec;
+    mgr.register_callback(kProd, rec.cb());
+    feed(mgr, make_i083(500000, manual_snapshot_entries(), 1));
+    CHECK(!rec.last().is_stale);
+
+    mgr.on_header(make_header('2', 0));  // I002: books and serials reset
+    CHECK(rec.last().is_stale);
+
+    // In-flight 'O' from the round that began before the reset: ignored.
+    feed(mgr, make_i084_o(499000, {make_snapshot_entry('0', 10315, 2, 1)}, 1));
+    CHECK(!mgr.get_book(kProd).has_value());
+
+    // The restarted realtime session must reach the subscriber (a serial
+    // starting at 1 into an empty book is a complete chain).
+    feed(mgr, make_i081(1, {make_entry('0', '0', 10400, 7, 1)}, 1));
+    CHECK(mgr.get_book(kProd)->last_prod_msg_seq == 1);
+    CHECK(level_is(mgr.get_book(kProd)->bids[0], 10400, 7));
+    CHECK(!rec.last().is_stale);
+
+    // Refresh Begin lifts the quarantine; the next 'O' round (assembled
+    // after the exchange's own reset) adopts normally.
+    feed(mgr, make_i084_az('A', 2, 1));
+    feed(mgr, make_i084_o(2, {make_snapshot_entry('0', 10401, 1, 1)}, 2));
+    CHECK(mgr.get_book(kProd)->last_prod_msg_seq == 2);
+    CHECK(level_is(mgr.get_book(kProd)->bids[0], 10401, 1));
+    CHECK(!rec.last().is_stale);
+}
+
+// The spec scopes the I002 book wipe to realtime groups. An I002 arriving on
+// a channel known to carry snapshots must reset only that channel's own
+// sequence tracker — the books and the realtime tracker survive.
+static void test_i002_on_snapshot_channel_does_not_wipe() {
+    OrderBookManager mgr;
+    Recorder rec;
+    mgr.register_callback_all(rec.cb());
+    // Realtime book, fresh; the 'O' feed teaches the manager that
+    // kSnapChannel carries snapshots.
+    feed(mgr, make_i083(10, {make_snapshot_entry('0', 10315, 2, 1)}, 1));
+    feed(mgr, make_i084_o(5, {make_snapshot_entry('0', 200, 2, 1)}, 1, "MXFG6"));
+    size_t deliveries = rec.books.size();
+
+    mgr.on_header(make_header('2', 0, kSnapChannel));
+
+    CHECK(rec.books.size() == deliveries);          // no stale flip delivered
+    CHECK(mgr.get_book(kProd).has_value());          // books survive
+    CHECK(!mgr.get_book(kProd)->is_stale);
+    CHECK(mgr.get_book("MXFG6").has_value());
+    CHECK(mgr.product_ids().size() == 2);
+
+    // Realtime continuity is untouched: the next contiguous message applies
+    // and stays fresh (a wiped tracker would have re-registered instead).
+    feed(mgr, make_i081(11, {make_entry('0', '0', 10400, 7, 1)}, 2));
+    CHECK(!mgr.get_book(kProd)->is_stale);
+    CHECK(level_is(mgr.get_book(kProd)->bids[0], 10400, 7));
+
+    // The snapshot channel's own serial restarted: seq 1 after the reset is
+    // not a duplicate and must not flag a gap (it is a snapshot channel —
+    // gaps there are ignored anyway; this just proves the tracker reset).
+    feed(mgr, make_i084_o(12, {make_snapshot_entry('0', 10401, 1, 1)}, 1));
+    CHECK(mgr.get_book(kProd)->last_prod_msg_seq == 12);
+
+    // An I002 on the realtime channel still wipes everything.
+    mgr.on_header(make_header('2', 0));
+    CHECK(mgr.product_ids().empty());
+}
+
 static void test_callback_routing() {
     OrderBookManager mgr;
     Recorder recA, recA2, recB, recAll;
@@ -756,6 +931,126 @@ static void test_two_thread_feed_smoke() {
     CHECK(deliveries.load() > 0);
 }
 
+
+// --- Wire-level decoding tests (drive TaifexParser::process_datagram) -----
+// Mirrors test/TAIFEX_mocker.py's packet construction: ESC + 18-byte header
+// + body + XOR checksum + 0x0D 0x0A terminal.
+
+static std::vector<uint8_t> wire_bcd(uint64_t v, int n) {
+    std::vector<uint8_t> out(n, 0);
+    for (int i = n - 1; i >= 0; --i) {
+        out[i] = (uint8_t)(((v / 10 % 10) << 4) | (v % 10));
+        v /= 100;
+    }
+    return out;
+}
+
+// body_len_override lets a test claim a BODY-LENGTH that disagrees with the
+// actual body (the checksum is still computed over the real bytes, so the
+// message reaches the length-agreement check, not the checksum check).
+static std::vector<uint8_t> wire_message(char kind, uint32_t channel_seq,
+                                         const std::vector<uint8_t>& body,
+                                         int body_len_override = -1) {
+    std::vector<uint8_t> content;
+    content.push_back('2');                 // TRANSMISSION-CODE
+    content.push_back((uint8_t)kind);       // MESSAGE-KIND
+    const uint8_t t[6] = {0x13, 0x15, 0x40, 0x00, 0x00, 0x00};
+    content.insert(content.end(), t, t + 6);                       // INFO-TIME
+    auto cid = wire_bcd(kRtChannel, 2);
+    content.insert(content.end(), cid.begin(), cid.end());          // CHANNEL-ID
+    auto seq = wire_bcd(channel_seq, 5);
+    content.insert(content.end(), seq.begin(), seq.end());          // CHANNEL-SEQ
+    content.push_back(0x01);                                        // VERSION-NO
+    auto bl = wire_bcd(body_len_override >= 0 ? (uint64_t)body_len_override
+                                              : (uint64_t)body.size(), 2);
+    content.insert(content.end(), bl.begin(), bl.end());            // BODY-LENGTH
+    content.insert(content.end(), body.begin(), body.end());
+    uint8_t x = 0;
+    for (uint8_t b : content) x ^= b;
+    std::vector<uint8_t> msg;
+    msg.push_back(0x1B);
+    msg.insert(msg.end(), content.begin(), content.end());
+    msg.push_back(x);
+    msg.push_back(0x0D);
+    msg.push_back(0x0A);
+    return msg;
+}
+
+// A checksum-valid message whose BODY-LENGTH disagrees with the framed
+// length must be dropped before any handler runs — the decoder would read
+// past the end of a truncated message otherwise.
+static void test_truncated_message_rejected() {
+    TaifexParser parser;
+    int i084_calls = 0;
+    parser.set_callbacks(nullptr, nullptr, nullptr, nullptr,
+                         [&](const I084_Packet&) { ++i084_calls; });
+
+    // Control: a well-formed 'A' (Refresh Begin) decodes.
+    std::vector<uint8_t> body = {'A'};
+    auto ls = wire_bcd(1000, 5);
+    body.insert(body.end(), ls.begin(), ls.end());
+    auto good = wire_message('C', 1, body);
+    parser.process_datagram(good.data(), good.size());
+    CHECK(i084_calls == 1);
+
+    // Same body but BODY-LENGTH claims 5 bytes MORE than are present: the
+    // 'A' decoder would read LAST-SEQ past the end. Must be dropped.
+    auto lying = wire_message('C', 2, body, (int)body.size() + 5);
+    parser.process_datagram(lying.data(), lying.size());
+    CHECK(i084_calls == 1);
+
+    // And a body physically too short for its type, with an agreeing
+    // BODY-LENGTH: 'A' with no LAST-SEQ at all.
+    auto stub = wire_message('C', 3, {'A'});
+    parser.process_datagram(stub.data(), stub.size());
+    CHECK(i084_calls == 1);
+}
+
+// A message whose BODY-LENGTH agrees with the frame but whose internal
+// entry COUNTS would walk past the end must be dropped without a partial
+// decode reaching the callbacks.
+static void test_lying_entry_count_rejected() {
+    TaifexParser parser;
+    int i084_calls = 0, i081_calls = 0;
+    parser.set_callbacks(nullptr, nullptr,
+                         [&](const I081_Packet&) { ++i081_calls; },
+                         nullptr,
+                         [&](const I084_Packet&) { ++i084_calls; });
+
+    // I084 'O' claiming 2 products but carrying only 1.
+    std::vector<uint8_t> body = {'O', 0x02};  // NO-ENTRIES = 2 (BCD)
+    const char* prod = "TXFG6               ";
+    body.insert(body.end(), prod, prod + 20);
+    auto seq = wire_bcd(5, 5);
+    body.insert(body.end(), seq.begin(), seq.end());
+    body.push_back(0x00);  // NO-MD-ENTRIES = 0
+    auto msg = wire_message('C', 1, body);
+    parser.process_datagram(msg.data(), msg.size());
+    CHECK(i084_calls == 0);
+
+    // I081 claiming 3 entries but carrying 1.
+    std::vector<uint8_t> b81(prod, prod + 20);
+    auto pseq = wire_bcd(7, 5);
+    b81.insert(b81.end(), pseq.begin(), pseq.end());
+    b81.push_back(0x03);  // NO-MD-ENTRIES = 3 (BCD)
+    std::vector<uint8_t> entry = {'0', '0', '0'};
+    auto px = wire_bcd(10315, 5);
+    entry.insert(entry.end(), px.begin(), px.end());
+    auto qty = wire_bcd(4, 4);
+    entry.insert(entry.end(), qty.begin(), qty.end());
+    entry.push_back(0x01);
+    b81.insert(b81.end(), entry.begin(), entry.end());
+    auto msg81 = wire_message('A', 2, b81);
+    parser.process_datagram(msg81.data(), msg81.size());
+    CHECK(i081_calls == 0);
+
+    // Control: the same I081 with an honest count decodes.
+    b81[25] = 0x01;  // NO-MD-ENTRIES = 1
+    auto ok81 = wire_message('A', 3, b81);
+    parser.process_datagram(ok81.data(), ok81.size());
+    CHECK(i081_calls == 1);
+}
+
 int main() {
     RUN(test_initial_build_from_i083);
     RUN(test_i081_new_append);
@@ -768,6 +1063,11 @@ int main() {
     RUN(test_gap_marks_stale_and_applies_best_effort);
     RUN(test_i084_recovery_then_fresh);
     RUN(test_i084_multi_product);
+    RUN(test_i084_a_z_are_ignored_by_manager);
+    RUN(test_i084_adoption_preserves_info_time);
+    RUN(test_i084_noop_carousel_delivery_suppressed);
+    RUN(test_truncated_message_rejected);
+    RUN(test_lying_entry_count_rejected);
     RUN(test_malformed_entries_ignored);
     RUN(test_i083_recovery_from_stale);
     RUN(test_i083_equal_seq_adoption_while_stale);
@@ -783,6 +1083,8 @@ int main() {
     RUN(test_heartbeat_reveals_gap_on_idle_channel);
     RUN(test_snapshot_channel_gap_ignored);
     RUN(test_i002_reset_clears_everything);
+    RUN(test_reset_then_inflight_i084_is_quarantined);
+    RUN(test_i002_on_snapshot_channel_does_not_wipe);
     RUN(test_callback_routing);
     RUN(test_reentrant_callback);
     RUN(test_two_thread_feed_smoke);

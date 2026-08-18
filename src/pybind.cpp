@@ -4,6 +4,7 @@
 #include <cstring>
 #include "parser.h"
 #include "order_book.h"
+#include "taifex_channels.h"
 
 namespace py = pybind11;
 
@@ -177,6 +178,9 @@ static void bind_order_book(py::module_ &m) {
         .def_property("info_time",
                       fixed_char_getter<16>(&OrderBook::info_time),
                       fixed_char_setter<16>(&OrderBook::info_time))
+        .def_property("snapshot_time",
+                      fixed_char_getter<16>(&OrderBook::snapshot_time),
+                      fixed_char_setter<16>(&OrderBook::snapshot_time))
         // std::array<OrderBookLevel, 5> converts to a Python list copy.
         .def_readwrite("bids", &OrderBook::bids)
         .def_readwrite("asks", &OrderBook::asks)
@@ -226,8 +230,56 @@ static void bind_order_book_manager(py::module_ &m) {
              "delivers a stale-flagged copy of every trusted book first.");
 }
 
+namespace {
+
+// Single-channel mode names, matching the MODE vocabulary the parquet
+// pipeline's gen_parquet.sh already uses: one capture file == one channel.
+struct ModeRow {
+    const char* name;
+    taifex::constants::Session session;
+    taifex::constants::Product product;
+    taifex::constants::Service service;
+};
+constexpr ModeRow kModes[] = {
+    {"FUTURES_DAY",            taifex::constants::Session::Day,   taifex::constants::Product::Futures, taifex::constants::Service::Realtime},
+    {"FUTURES_NIGHT",          taifex::constants::Session::Night, taifex::constants::Product::Futures, taifex::constants::Service::Realtime},
+    {"OPTIONS_DAY",            taifex::constants::Session::Day,   taifex::constants::Product::Options, taifex::constants::Service::Realtime},
+    {"OPTIONS_NIGHT",          taifex::constants::Session::Night, taifex::constants::Product::Options, taifex::constants::Service::Realtime},
+    {"FUTURES_DAY_SNAPSHOT",   taifex::constants::Session::Day,   taifex::constants::Product::Futures, taifex::constants::Service::SnapshotRefresh},
+    {"FUTURES_NIGHT_SNAPSHOT", taifex::constants::Session::Night, taifex::constants::Product::Futures, taifex::constants::Service::SnapshotRefresh},
+    {"OPTIONS_DAY_SNAPSHOT",   taifex::constants::Session::Day,   taifex::constants::Product::Options, taifex::constants::Service::SnapshotRefresh},
+    {"OPTIONS_NIGHT_SNAPSHOT", taifex::constants::Session::Night, taifex::constants::Product::Options, taifex::constants::Service::SnapshotRefresh},
+};
+
+}  // namespace
+
 PYBIND11_MODULE(taifex_udp_resolver, m) {
     m.doc() = "TAIFEX UDP Resolver (Python interface)";
+
+    // The manual's endpoint table, keyed by mode name. No caller should ever
+    // type a multicast address by hand.
+    {
+        py::tuple modes(std::size(kModes));
+        for (size_t i = 0; i < std::size(kModes); ++i)
+            modes[i] = py::str(kModes[i].name);
+        m.attr("MODES") = modes;
+    }
+    m.def("endpoint",
+          [](const std::string& mode) {
+              for (const ModeRow& row : kModes) {
+                  if (mode == row.name) {
+                      const taifex::constants::Channel* ch =
+                          taifex::constants::find(row.session, row.product, row.service);
+                      return py::make_tuple(std::string(ch->group), ch->port);
+                  }
+              }
+              throw py::value_error("unknown mode '" + mode +
+                                    "'; see taifex_udp_resolver.MODES");
+          },
+          py::arg("mode"),
+          "Return (multicast_group, port) for a mode name from MODES,\n"
+          "transcribed from the TAIFEX manual (V0.9.5). One mode == one\n"
+          "multicast channel.");
 
     bind_header(m);
     bind_match_data(m);
@@ -256,8 +308,8 @@ PYBIND11_MODULE(taifex_udp_resolver, m) {
                 std::function<void(const I081_Packet &)> cb_i081,
                 std::function<void(const I083_Packet &)> cb_i083,
                 std::function<void(const I084_Packet &)> cb_i084) {
-                 self.start_loop(port, cb_i024, cb_i025, cb_i081, cb_i083,
-                                 cb_i084);
+                 return self.start_loop(port, cb_i024, cb_i025, cb_i081,
+                                        cb_i083, cb_i084);
              },
              py::arg("port"),
              py::arg("cb_i024"),
@@ -268,13 +320,45 @@ PYBIND11_MODULE(taifex_udp_resolver, m) {
              "Start the UDP receive loop. One callback per message type, in\n"
              "message-ID order; pass None for any type you do not need. Each\n"
              "callback is invoked from the receive thread; the GIL is\n"
-             "acquired automatically by pybind11.")
+             "acquired automatically by pybind11.\n"
+             "Returns False when socket setup failed (bad configuration,\n"
+             "bind error); the receive thread is not started in that case.")
         // end_loop joins the receive thread, which may be blocked acquiring
         // the GIL to deliver a callback — the GIL must be released while
         // waiting or shutdown deadlocks.
         .def("end_loop", &TaifexParser::end_loop,
              py::call_guard<py::gil_scoped_release>(),
              "Stop the parsing loop")
+        .def("set_callbacks",
+             [](TaifexParser &self,
+                std::function<void(const I024_Packet &)> cb_i024,
+                std::function<void(const I025_Packet &)> cb_i025,
+                std::function<void(const I081_Packet &)> cb_i081,
+                std::function<void(const I083_Packet &)> cb_i083,
+                std::function<void(const I084_Packet &)> cb_i084) {
+                 self.set_callbacks(cb_i024, cb_i025, cb_i081, cb_i083,
+                                    cb_i084);
+             },
+             py::arg("cb_i024"),
+             py::arg("cb_i025"),
+             py::arg("cb_i081"),
+             py::arg("cb_i083"),
+             py::arg("cb_i084"),
+             "Install the five per-type callbacks without starting the\n"
+             "socket loop (file mode). Pass None for any type you do not\n"
+             "need.")
+        .def("process_datagram",
+             [](TaifexParser &self, py::bytes datagram) {
+                 char *buf;
+                 py::ssize_t len;
+                 if (PYBIND11_BYTES_AS_STRING_AND_SIZE(datagram.ptr(), &buf, &len) != 0)
+                     throw py::error_already_set();
+                 self.process_datagram(reinterpret_cast<const uint8_t*>(buf), static_cast<size_t>(len));
+             },
+             py::arg("datagram"),
+             "Split one UDP datagram payload on 0x0D 0x0A and feed each\n"
+             "message to the parser; callbacks (and the order-book manager,\n"
+             "if attached) fire inline on the calling thread.")
         .def("set_multicast", &TaifexParser::set_multicast,
              py::arg("group"), py::arg("iface_ip"),
              "Configure the IPv4 multicast group + local interface IP to join.")

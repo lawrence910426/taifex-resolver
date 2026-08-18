@@ -46,15 +46,24 @@ bool TaifexParser::verify_checksum(const uint8_t* data, size_t len) {
     return calculated_xor == data[len - 3];
 }
 
-void TaifexParser::start_loop(int port, I024Callback cb24, I025Callback cb25, I081Callback cb81, I083Callback cb83, I084Callback cb84) {
-    if (running) return;
+bool TaifexParser::start_loop(int port, I024Callback cb24, I025Callback cb25, I081Callback cb81, I083Callback cb83, I084Callback cb84) {
+    if (running) return true;
+    set_callbacks(cb24, cb25, cb81, cb83, cb84);
+    // Socket setup runs HERE, on the caller's thread, before the receive
+    // thread is spawned: every failure must reach the caller, and only
+    // end_loop may ever tear the socket down once the thread exists.
+    if (!setup_socket(port)) return false;
     running = true;
+    recv_thread = std::thread(&TaifexParser::receive_loop, this);
+    return true;
+}
+
+void TaifexParser::set_callbacks(I024Callback cb24, I025Callback cb25, I081Callback cb81, I083Callback cb83, I084Callback cb84) {
     on_i024 = cb24;
     on_i025 = cb25;
     on_i081 = cb81;
     on_i083 = cb83;
     on_i084 = cb84;
-    recv_thread = std::thread(&TaifexParser::receive_loop, this, port);
 }
 
 void TaifexParser::set_order_book_manager(OrderBookManager* mgr) {
@@ -62,7 +71,10 @@ void TaifexParser::set_order_book_manager(OrderBookManager* mgr) {
 }
 
 void TaifexParser::end_loop() {
-    running = false;    
+    // `running = false` MUST precede shutdown(): the shutdown wakes the
+    // blocked recvfrom (with a zero-length return), and the loop's re-check
+    // of `running` is what lets the thread exit.
+    running = false;
     if (sockfd != -1) {
         shutdown(sockfd, SHUT_RDWR);
         close(sockfd);
@@ -71,59 +83,144 @@ void TaifexParser::end_loop() {
     if (recv_thread.joinable()) recv_thread.join();
 }
 
-void TaifexParser::receive_loop(int port) {
+namespace {
+std::string trim_copy(const std::string& s) {
+    size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
+}
+}  // namespace
+
+bool TaifexParser::setup_socket(int port) {
+    // Resolve group + interface up front so a malformed configuration fails
+    // here instead of silently degrading. inet_pton, not inet_addr: the
+    // legacy 3-part form does not fail — inet_addr("225.140.140") yields
+    // 225.140.0.140, a valid but WRONG group that would join cleanly and
+    // subscribe to the wrong feed with no error anywhere.
+    in_addr_t group_addr = htonl(INADDR_ANY);
+    in_addr_t iface_addr = htonl(INADDR_ANY);
+    if (use_multicast) {
+        const std::string group = trim_copy(multicast_group);
+        const std::string iface = trim_copy(interface_ip);
+        if (inet_pton(AF_INET, group.c_str(), &group_addr) != 1 ||
+            !IN_MULTICAST(ntohl(group_addr))) {
+            std::cerr << "[ERROR] invalid multicast group '" << multicast_group
+                      << "' — expected a dotted-quad IPv4 multicast address "
+                         "(four octets, no leading zeros)" << std::endl;
+            return false;
+        }
+        if (iface.empty() || inet_pton(AF_INET, iface.c_str(), &iface_addr) != 1) {
+            // Required: with imr_interface = INADDR_ANY the kernel resolves
+            // the join device by ROUTING THE GROUP ADDRESS. Hosts without a
+            // 224.0.0.0/4 route then join on the default-route interface —
+            // the join succeeds, the socket receives nothing, silently.
+            std::cerr << "[ERROR] interface IP is required with a multicast "
+                         "group and must be a local address; got '"
+                      << interface_ip << "'" << std::endl;
+            return false;
+        }
+    }
+
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0) return;
+    if (sockfd < 0) {
+        std::cerr << "[ERROR] socket() failed: " << strerror(errno) << std::endl;
+        return false;
+    }
 
     int reuse = 1;
     setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
+    // Enlarge the receive queue so brief consumer stalls don't drop packets.
+    // SO_RCVBUFFORCE bypasses net.core.rmem_max but requires CAP_NET_ADMIN;
+    // fall back to SO_RCVBUF (clamped to rmem_max) when unavailable.
+    int rcvbuf = 64 * 1024 * 1024;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_RCVBUFFORCE, &rcvbuf, sizeof(rcvbuf)) < 0) {
+        setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    }
+    int actual_rcvbuf = 0;
+    socklen_t optlen = sizeof(actual_rcvbuf);
+    getsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &actual_rcvbuf, &optlen);
+    std::cerr << "[INFO] recv buffer: " << actual_rcvbuf << " bytes" << std::endl;
+
+    if (use_multicast) {
+        // Belt: turn OFF the "deliver every group the HOST joined" default.
+        // With IP_MULTICAST_ALL=1 (the kernel default), a socket receives
+        // any group on its port that ANY process on the host has joined —
+        // measured: a group-bound socket with a failed join still received
+        // the feed through a co-tenant's membership. With it off, this
+        // socket's own IP_ADD_MEMBERSHIP below is the only thing that
+        // admits traffic, which is what makes a failed join a real error.
+        int mc_all = 0;
+        if (setsockopt(sockfd, IPPROTO_IP, IP_MULTICAST_ALL, &mc_all, sizeof(mc_all)) < 0) {
+            std::cerr << "[WARN] IP_MULTICAST_ALL=0 failed: " << strerror(errno)
+                      << " — group isolation still enforced by the bind address"
+                      << std::endl;
+        }
+    }
+
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    // Bind to the GROUP, not INADDR_ANY: TAIFEX day and night sessions share
+    // every port and differ only by group (225.0.x day vs 225.10.x night),
+    // so a wildcard bind lets the other session's feed leak into this
+    // listener. Binding the group address makes the kernel demultiplex for
+    // us. Legal on Linux without privilege, and legal before the IGMP join.
+    addr.sin_addr.s_addr = use_multicast ? group_addr : htonl(INADDR_ANY);
 
     if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        std::cerr << "[ERROR] Bind failed on port " << port << std::endl;
-        return;
+        std::cerr << "[ERROR] bind failed on "
+                  << (use_multicast ? multicast_group : std::string("0.0.0.0"))
+                  << ":" << port << ": " << strerror(errno) << std::endl;
+        close(sockfd);
+        sockfd = -1;
+        return false;
     }
 
     if (use_multicast) {
         struct ip_mreq mreq{};
-        mreq.imr_multiaddr.s_addr = inet_addr(multicast_group.c_str());
-        mreq.imr_interface.s_addr = inet_addr(interface_ip.c_str());
+        mreq.imr_multiaddr.s_addr = group_addr;
+        mreq.imr_interface.s_addr = iface_addr;  // receive-side iface selector
 
-        std::cerr << "[INFO] Attempting to join multicast group " << multicast_group
+        std::cerr << "[INFO] joining multicast group " << multicast_group
                   << " on interface " << interface_ip << std::endl;
 
+        // Hard error: the socket is bound to the group and IP_MULTICAST_ALL
+        // is off, so without a membership it receives NOTHING — and a
+        // silently idle socket is this system's worst failure mode. Expect
+        // EADDRNOTAVAIL (interface not local), ENODEV, or ENOBUFS
+        // (net.ipv4.igmp_max_memberships, default 20).
         if (setsockopt(sockfd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
-            std::cerr << "[WARN] IP_ADD_MEMBERSHIP failed: " << strerror(errno)
-                      << " — continuing without IGMP join" << std::endl;
+            std::cerr << "[ERROR] IP_ADD_MEMBERSHIP " << multicast_group
+                      << " on " << interface_ip << " failed: "
+                      << strerror(errno) << std::endl;
+            close(sockfd);
+            sockfd = -1;
+            return false;
         }
-
-        struct in_addr local_interface{};
-        local_interface.s_addr = inet_addr(interface_ip.c_str());
-        if (setsockopt(sockfd, IPPROTO_IP, IP_MULTICAST_IF, &local_interface, sizeof(local_interface)) < 0) {
-            std::cerr << "[WARN] IP_MULTICAST_IF failed: " << strerror(errno)
-                      << " — continuing" << std::endl;
-        }
+        // IP_MULTICAST_IF is deliberately NOT set: it selects the egress
+        // interface for OUTBOUND multicast, and this socket only ever
+        // receives. Receive-side interface selection is mreq.imr_interface.
     }
+    return true;
+}
 
+void TaifexParser::receive_loop() {
     uint8_t buffer[4096];
     while (running) {
         struct sockaddr_in client_addr;
         socklen_t addr_len = sizeof(client_addr);
         ssize_t len = recvfrom(sockfd, buffer, sizeof(buffer), 0, (struct sockaddr*)&client_addr, &addr_len);
         if (len > 0) {
-            size_t start_pos = 0;
-            for (size_t i = 0; i < (size_t)len - 1; i++) {
-                if (buffer[i] == 0x0D && buffer[i + 1] == 0x0A) {
-                    process_raw_data(buffer + start_pos, i + 2 - start_pos);
-                    start_pos = i + 2;
-                }
-            }
-        } else if (len < 0) {
-            if (errno != EINTR && errno != EBADF) {
+            process_datagram(buffer, static_cast<size_t>(len));
+        } else {
+            // len == 0 means the socket was shut down (end_loop). shutdown()
+            // returns ENOTCONN on an unconnected UDP socket but still wakes
+            // this recvfrom, which then returns 0 forever — without this
+            // branch the loop would spin at 100% CPU whenever `running` is
+            // not already false.
+            if (len < 0 && errno != EINTR && errno != EBADF) {
                 std::cerr << "[ERROR] recvfrom error: " << strerror(errno) << std::endl;
             }
             break;
@@ -131,8 +228,22 @@ void TaifexParser::receive_loop(int port) {
     }
 }
 
+void TaifexParser::process_datagram(const uint8_t* data, size_t len) {
+    if (len < 2) return;
+    size_t start_pos = 0;
+    for (size_t i = 0; i < len - 1; i++) {
+        if (data[i] == 0x0D && data[i + 1] == 0x0A) {
+            process_raw_data(data + start_pos, i + 2 - start_pos);
+            start_pos = i + 2;
+        }
+    }
+}
+
 void TaifexParser::process_raw_data(const uint8_t* data, size_t length) {
-    if (length < 20 || data[0] != ESC_CODE) return;
+    // ESC(1) + header(18) + body + checksum(1) + terminal(2). The legal
+    // zero-body message (I001 heartbeat) is exactly 22 bytes; nothing
+    // shorter can carry a full header.
+    if (length < 22 || data[0] != ESC_CODE) return;
     if (!verify_checksum(data, length)) {
         std::cerr << "[DEBUG] Checksum failed" << std::endl;
         return;
@@ -147,26 +258,42 @@ void TaifexParser::process_raw_data(const uint8_t* data, size_t length) {
     header.version_no = (uint8_t)bcd_to_uint(data + 16, 1);
     header.body_len = (uint16_t)bcd_to_uint(data + 17, 2);
 
+    // The framed length must agree with the header's own BODY-LENGTH. The
+    // XOR checksum only covers the bytes that are present — it says nothing
+    // about bytes a decoder would read PAST the end of a truncated message.
+    // Rejected before on_header: a mis-framed CHANNEL-SEQ must not fake a
+    // channel gap.
+    if (length != 22u + header.body_len) {
+        std::cerr << "[WARN] BODY-LENGTH " << header.body_len
+                  << " disagrees with framed length " << length
+                  << " — message dropped" << std::endl;
+        return;
+    }
+
     // The order book manager tracks CHANNEL-SEQ over every message on the
     // channel (including I001 heartbeats, I002 sequence resets and kinds this
     // parser does not decode), so it is fed each valid header up front.
     if (book_mgr_) book_mgr_->on_header(header);
 
     switch (header.message_kind) {
-        case 'D': handle_i024(data, header); break;
+        case 'D': handle_i024(data, length, header); break;
         case 'E': handle_i025(data, length, header); break;
-        case 'A': handle_i081(data, header); break;
-        case 'B': handle_i083(data, header); break;
-        case 'C': handle_i084(data, header); break;
+        case 'A': handle_i081(data, length, header); break;
+        case 'B': handle_i083(data, length, header); break;
+        case 'C': handle_i084(data, length, header); break;
     }
 }
 
 // --- Handler: I024 (Trade) ---
 
-bool TaifexParser::handle_i024(const uint8_t* data, const Header& header) {
+bool TaifexParser::handle_i024(const uint8_t* data, size_t length, const Header& header) {
+    const size_t end = length - 3;  // checksum + terminal
     I024_Packet pkt;
     pkt.header = header;
-    size_t offset = 19; 
+    size_t offset = 19;
+    // Fixed part: PROD-ID(20) SEQ(5) FLAG(1) MATCH-TIME(6) SIGN(1) PX(5)
+    // QTY(4) DISPLAY-ITEM(1) = 43 bytes.
+    if (offset + 43 > end) return false; 
 
     // 1. Prod ID
     memcpy(pkt.prod_id, data + offset, 20);
@@ -195,8 +322,10 @@ bool TaifexParser::handle_i024(const uint8_t* data, const Header& header) {
     pkt.display_item = data[offset++];
     int occurs = pkt.display_item & 0x7F; 
 
-    // 7. Repeated Match Data
+    // 7. Repeated Match Data (8 bytes each; `occurs` comes from the packet
+    // and can lie even when BODY-LENGTH agrees)
     for (int i = 0; i < occurs; ++i) {
+        if (offset + 8 > end) return false;
         MatchData md;
         md.price_sign = data[offset++];
         md.price = bcd_to_uint(data + offset, 5);
@@ -206,7 +335,8 @@ bool TaifexParser::handle_i024(const uint8_t* data, const Header& header) {
         pkt.consecutive_matches.push_back(md);
     }
 
-    // 8. Cumulative Data 
+    // 8. Cumulative Data
+    if (offset + 12 > end) return false;
     pkt.total_qty = (uint32_t)bcd_to_uint(data + offset, 4); offset += 4;
     pkt.buy_cnt = (uint32_t)bcd_to_uint(data + offset, 4);   offset += 4;
     pkt.sell_cnt = (uint32_t)bcd_to_uint(data + offset, 4);  offset += 4;
@@ -254,10 +384,13 @@ bool TaifexParser::handle_i025(const uint8_t* data, size_t length, const Header&
 
 // --- Handler: I081 (Incremental) ---
 
-bool TaifexParser::handle_i081(const uint8_t* data, const Header& header) {
+bool TaifexParser::handle_i081(const uint8_t* data, size_t length, const Header& header) {
+    const size_t end = length - 3;  // checksum + terminal
     I081_Packet pkt;
     pkt.header = header;
     size_t offset = 19;
+    // Fixed part: PROD-ID(20) SEQ(5) NO-MD-ENTRIES(1) = 26 bytes.
+    if (offset + 26 > end) return false;
 
     memcpy(pkt.prod_id, data + offset, 20);
     pkt.prod_id[20] = '\0';
@@ -270,6 +403,7 @@ bool TaifexParser::handle_i081(const uint8_t* data, const Header& header) {
     offset += 1;
 
     for (int i = 0; i < pkt.no_md_entries; ++i) {
+        if (offset + 13 > end) return false;  // 13 bytes per MD entry
         MDEntry entry;
         entry.update_action = data[offset++];
         entry.entry_type = data[offset++];
@@ -290,10 +424,13 @@ bool TaifexParser::handle_i081(const uint8_t* data, const Header& header) {
 
 // --- Handler: I083 (Snapshot) ---
 
-bool TaifexParser::handle_i083(const uint8_t* data, const Header& header) {
+bool TaifexParser::handle_i083(const uint8_t* data, size_t length, const Header& header) {
+    const size_t end = length - 3;  // checksum + terminal
     I083_Packet pkt;
     pkt.header = header;
     size_t offset = 19;
+    // Fixed part: PROD-ID(20) SEQ(5) CALC-FLAG(1) NO-MD-ENTRIES(1) = 27 bytes.
+    if (offset + 27 > end) return false;
 
     memcpy(pkt.prod_id, data + offset, 20);
     pkt.prod_id[20] = '\0';
@@ -308,6 +445,7 @@ bool TaifexParser::handle_i083(const uint8_t* data, const Header& header) {
     offset += 1;
 
     for (int i = 0; i < pkt.no_md_entries; ++i) {
+        if (offset + 12 > end) return false;  // 12 bytes per snapshot entry
         SnapshotEntry entry;
         entry.entry_type = data[offset++];
         entry.price_sign = data[offset++];
@@ -329,27 +467,33 @@ bool TaifexParser::handle_i083(const uint8_t* data, const Header& header) {
 // MESSAGE-TYPE at offset 19 selects the body. We resolve 'A'/'O'/'Z'; 'S'/'P'
 // (statistics / product status) are delivered header+type only (out of scope).
 
-bool TaifexParser::handle_i084(const uint8_t* data, const Header& header) {
+bool TaifexParser::handle_i084(const uint8_t* data, size_t length, const Header& header) {
+    const size_t end = length - 3;  // checksum + terminal
     I084_Packet pkt;
     pkt.header = header;
     pkt.last_seq = 0;
     pkt.no_entries = 0;
     size_t offset = 19;
 
+    if (offset + 1 > end) return false;
     pkt.message_type = data[offset++];
 
     switch (pkt.message_type) {
         case 'A':   // Refresh Begin
         case 'Z':   // Refresh Complete
+            if (offset + 5 > end) return false;  // LAST-SEQ
             pkt.last_seq = (uint32_t)bcd_to_uint(data + offset, 5);
             offset += 5;
             break;
 
         case 'O': { // Order Data: NO-ENTRIES products, each a small order book
+            if (offset + 1 > end) return false;
             pkt.no_entries = (uint8_t)bcd_to_uint(data + offset, 1);
             offset += 1;
 
             for (int p = 0; p < pkt.no_entries; ++p) {
+                // Per product: PROD-ID(20) LAST-PROD-MSG-SEQ(5) COUNT(1).
+                if (offset + 26 > end) return false;
                 I084Product prod;
                 memcpy(prod.prod_id, data + offset, 20);
                 prod.prod_id[20] = '\0';
@@ -362,6 +506,7 @@ bool TaifexParser::handle_i084(const uint8_t* data, const Header& header) {
                 offset += 1;
 
                 for (int i = 0; i < prod.no_md_entries; ++i) {
+                    if (offset + 12 > end) return false;  // 12 B per entry
                     SnapshotEntry entry;
                     entry.entry_type = data[offset++];
                     entry.price_sign = data[offset++];
